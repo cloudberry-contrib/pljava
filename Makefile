@@ -41,7 +41,8 @@ REGRESS_DIR = $(top_builddir)
 .PHONY: build installdirs install uninstall test localconfig targetconfig installcheck targetcheck release
 	
 install-nar-snapshot:
-	curl -o nar-maven-plugin.tar.gz https://codeload.github.com/maven-nar/nar-maven-plugin/tar.gz/refs/tags/nar-maven-plugin-3.5.2
+	rm -rf nar-maven-plugin nar-maven-plugin-nar-maven-plugin-3.5.2 nar-maven-plugin.tar.gz
+	curl -fsSL -o nar-maven-plugin.tar.gz https://codeload.github.com/maven-nar/nar-maven-plugin/tar.gz/refs/tags/nar-maven-plugin-3.5.2
 	tar xzf nar-maven-plugin.tar.gz
 	mv nar-maven-plugin-nar-maven-plugin-3.5.2 nar-maven-plugin
 	(cd nar-maven-plugin ; mvn)
