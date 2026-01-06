@@ -1,0 +1,130 @@
+name: Cloudberry PL/Java CI
+
+on:
+  pull_request:
+    branches: [ main ]
+    types: [opened, synchronize, reopened, edited]
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CLOUDBERRY_REPO: apache/cloudberry
+  CLOUDBERRY_REF: main
+  COMPOSE_FILE: pljava/concourse/docker/ubuntu22.04/docker-compose.yml
+  CONTAINER_NAME: cbdb-pljava
+
+jobs:
+  ci:
+    name: Build + Smoke (Docker)
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet || true
+          sudo rm -rf /opt/ghc || true
+          sudo rm -rf /usr/local/share/boost || true
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /opt/hostedtoolcache || true
+          sudo docker system prune -af || true
+          df -h
+
+      - name: Checkout PL/Java (this repo)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          path: pljava
+
+      - name: Checkout Cloudberry source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.CLOUDBERRY_REPO }}
+          ref: ${{ env.CLOUDBERRY_REF }}
+          path: cloudberry
+          submodules: true
+
+      - name: Build and start dev container
+        run: |
+          docker compose -f ${{ env.COMPOSE_FILE }} down -v || true
+          docker compose -f ${{ env.COMPOSE_FILE }} up -d
+          docker exec ${{ env.CONTAINER_NAME }} sudo find /home/gpadmin/workspace/cloudberry -path /home/gpadmin/workspace/cloudberry/.git -prune -o -exec chown gpadmin:gpadmin {} +
+          docker exec ${{ env.CONTAINER_NAME }} sudo find /home/gpadmin/workspace/pljava -path /home/gpadmin/workspace/pljava/.git -prune -o -exec chown gpadmin:gpadmin {} +
+
+      - name: Build Cloudberry + PL/Java and run tests (installcheck)
+        run: |
+          docker exec ${{ env.CONTAINER_NAME }} bash -lc "bash /home/gpadmin/workspace/pljava/concourse/docker/ubuntu22.04/scripts/entrypoint.sh"
+
+      - name: Collect logs and results
+        if: always()
+        run: |
+          mkdir -p artifacts
+          docker logs ${{ env.CONTAINER_NAME }} > artifacts/cbdb-pljava.log 2>&1 || true
+          docker exec ${{ env.CONTAINER_NAME }} bash -lc "source /usr/local/cloudberry-db/cloudberry-env.sh && source /home/gpadmin/workspace/cloudberry/gpAux/gpdemo/gpdemo-env.sh && gpstate -s" > artifacts/gpstate.txt 2>&1 || true
+          docker exec ${{ env.CONTAINER_NAME }} bash -lc "source /usr/local/cloudberry-db/cloudberry-env.sh && source /home/gpadmin/workspace/cloudberry/gpAux/gpdemo/gpdemo-env.sh && psql -d template1 -c 'select version()'" > artifacts/version.txt 2>&1 || true
+
+          # Regression outputs (if present)
+          if [ -d pljava/gpdb/tests/results ]; then
+            tar czf artifacts/pljava-regress-results.tar.gz -C pljava gpdb/tests/results || true
+          fi
+          ls -la pljava/gpdb/tests/regression.* 2>/dev/null || true
+          cp -v pljava/gpdb/tests/regression.* artifacts/ 2>/dev/null || true
+
+          # Cloudberry demo cluster logs (if present)
+          if [ -d cloudberry/gpAux/gpdemo ]; then
+            find cloudberry/gpAux/gpdemo -maxdepth 4 -type d \( -name pg_log -o -name log \) -print 2>/dev/null || true
+            tar czf artifacts/cloudberry-demo-logs.tar.gz -C cloudberry gpAux/gpdemo 2>/dev/null || true
+          fi
+
+      - name: Summarize installcheck
+        if: always()
+        run: |
+          LOG="pljava/gpdb/tests/results/installcheck.log"
+          {
+            echo "## PL/Java installcheck"
+            if [ -f "$LOG" ]; then
+              echo ""
+              echo "- Log: \`$LOG\`"
+              echo "- Test results dir: \`pljava/gpdb/tests/results/\`"
+              echo ""
+              TOTAL=$(grep -E "^[[:space:]]*test .* \\.\\.\\." -c "$LOG" || true)
+              OK=$(grep -E "^[[:space:]]*test .* \\.\\.\\. ok" -c "$LOG" || true)
+              FAILED=$(grep -E "^[[:space:]]*test .* \\.\\.\\. FAILED" -c "$LOG" || true)
+              echo "- Total: $TOTAL"
+              echo "- ok: $OK"
+              echo "- FAILED: $FAILED"
+              echo ""
+              echo "Last 50 lines:"
+              echo ""
+              echo '```'
+              tail -n 50 "$LOG" || true
+              echo '```'
+            else
+              echo ""
+              echo "- No \`installcheck.log\` found (build may have failed early)."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-and-results
+          path: |
+            artifacts/**
+            pljava/gpdb/tests/results/**
+            pljava/gpdb/tests/regression.*
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker compose -f ${{ env.COMPOSE_FILE }} down -v || true
