@@ -24,6 +24,8 @@ grant {
 
 	permission java.util.PropertyPermission
 		"org.postgresql.server.encoding", "read";
+	permission java.util.PropertyPermission
+		"user.language", "read";
 
 	// PostgreSQL allows SELECT current_database() or SHOW cluster_name anyway.
 	//

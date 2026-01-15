@@ -196,7 +196,7 @@ public class Invocation
 		});
 	}
 
-	static void clearErrorCondition()
+	public static void clearErrorCondition()
 	{
 		doInPG(() ->
 		{

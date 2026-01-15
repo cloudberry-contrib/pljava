@@ -31,6 +31,7 @@ JAVA_HOME := $(PLJAVA_HOME)
 PLJAVADATA = $(DESTDIR)$(datadir)/pljava
 PLJAVALIB  = $(DESTDIR)$(pkglibdir)/java
 PLJAVAEXT  = $(DESTDIR)$(datadir)/extension
+PLJAVASYSCONF = $(shell pg_config --sysconfdir)
 
 REGRESS_OPTS = --dbname=pljava_test --create-role=pljava_test
 REGRESS = pljava_ext_init pljava_functions pljava_test pljava_ext_cleanup pljava_init pljava_functions pljava_test pljava_uninstall
@@ -49,8 +50,9 @@ install-nar-snapshot:
 
 build: install-nar-snapshot
 	mvn clean install
-	find $(PROJDIR)/pljava-so/target/nar/ -name "libpljava-so-$(PLJAVA_OSS_VERSION).so" -exec cp {} $(PROJDIR)/$(MODULE_big).so \;
+	cp $(PROJDIR)/pljava-so/target/pljava-pgxs/libpljava-so-$(PLJAVA_OSS_VERSION).so $(PROJDIR)/$(MODULE_big).so
 	cp $(PROJDIR)/pljava/target/pljava-$(PLJAVA_OSS_VERSION).jar $(PROJDIR)/target/pljava.jar
+	cp $(PROJDIR)/pljava-api/target/pljava-api-$(PLJAVA_OSS_VERSION).jar $(PROJDIR)/target/pljava-api.jar
 	cp $(PROJDIR)/pljava-examples/target/pljava-examples-$(PLJAVA_OSS_VERSION).jar $(PROJDIR)/target/examples.jar
 
 installdirs:
@@ -58,19 +60,26 @@ installdirs:
 	$(MKDIR_P) '$(PLJAVADATA)'
 	$(MKDIR_P) '$(PLJAVADATA)/docs'
 	$(MKDIR_P) '$(PLJAVAEXT)'
+	$(MKDIR_P) '$(PLJAVASYSCONF)'
 
 install: installdirs install-lib
+	$(INSTALL_PROGRAM) '$(PROJDIR)/pljava-so/target/pljava-pgxs/libpljava-so-$(PLJAVA_OSS_VERSION).so' '$(pkglibdir)/libpljava-so-$(PLJAVA_OSS_VERSION).so'
+	$(INSTALL_DATA) '$(PROJDIR)/pljava/target/pljava-$(PLJAVA_OSS_VERSION).jar'                   '$(PLJAVADATA)/pljava-$(PLJAVA_OSS_VERSION).jar'
+	$(INSTALL_DATA) '$(PROJDIR)/pljava-api/target/pljava-api-$(PLJAVA_OSS_VERSION).jar'           '$(PLJAVADATA)/pljava-api-$(PLJAVA_OSS_VERSION).jar'
+	$(INSTALL_DATA) '$(PROJDIR)/pljava-examples/target/pljava-examples-$(PLJAVA_OSS_VERSION).jar' '$(PLJAVADATA)/pljava-examples-$(PLJAVA_OSS_VERSION).jar'
 	$(INSTALL_DATA) '$(PROJDIR)/pljava/target/pljava-$(PLJAVA_OSS_VERSION).jar'                   '$(PLJAVALIB)/pljava.jar'
+	$(INSTALL_DATA) '$(PROJDIR)/pljava-api/target/pljava-api-$(PLJAVA_OSS_VERSION).jar'           '$(PLJAVALIB)/pljava-api.jar'
 	$(INSTALL_DATA) '$(PROJDIR)/pljava-examples/target/pljava-examples-$(PLJAVA_OSS_VERSION).jar' '$(PLJAVALIB)/examples.jar'
 	$(INSTALL_DATA) '$(PROJDIR)/gpdb/installation/install.sql'                                    '$(PLJAVADATA)'
 	$(INSTALL_DATA) '$(PROJDIR)/gpdb/installation/uninstall.sql'                                  '$(PLJAVADATA)'
 	$(INSTALL_DATA) '$(PROJDIR)/gpdb/installation/install_pljavat.sql'                            '$(PLJAVADATA)'
 	$(INSTALL_DATA) '$(PROJDIR)/gpdb/installation/uninstall_pljavat.sql'                          '$(PLJAVADATA)'
 	$(INSTALL_DATA) '$(PROJDIR)/gpdb/installation/examples.sql'                                   '$(PLJAVADATA)'
-	$(INSTALL_DATA) '$(PROJDIR)/gpdb/installation/pljava--1.5.0.sql'                              '$(PLJAVAEXT)'
+	$(INSTALL_DATA) '$(PROJDIR)/gpdb/installation/pljava--$(PLJAVA_OSS_VERSION).sql'              '$(PLJAVADATA)'
 	$(INSTALL_DATA) '$(PROJDIR)/gpdb/installation/pljava.control'                                 '$(PLJAVAEXT)'
 	$(INSTALL_DATA) '$(PROJDIR)/gpdb/installation/pljavat--1.5.0.sql'                             '$(PLJAVAEXT)'
 	$(INSTALL_DATA) '$(PROJDIR)/gpdb/installation/pljavat.control'                                '$(PLJAVAEXT)'
+	$(INSTALL_DATA) '$(PROJDIR)/pljava-packaging/target/classes/pljava.policy'                    '$(PLJAVASYSCONF)/pljava.policy'
 	find $(PROJDIR)/docs -name "*.html" -exec $(INSTALL_DATA) {} '$(PLJAVADATA)/docs' \;
 
 uninstall: uninstall-lib 
@@ -82,7 +91,7 @@ test:
 	echo 'host    all      pljava_test   0.0.0.0/0    trust # PLJAVA' >> $(MASTER_DATA_DIRECTORY)/pg_hba.conf
 	echo 'local   all      pljava_test                trust # PLJAVA' >> $(MASTER_DATA_DIRECTORY)/pg_hba.conf
 	gpstop -u
-	cd $(PROJDIR)/gpdb/tests && $(REGRESS_DIR)/src/test/regress/pg_regress --bindir=$(bindir) $(REGRESS_OPTS) $(REGRESS)
+	cd $(PROJDIR)/gpdb/tests && $(REGRESS_DIR)/src/test/regress/pg_regress --bindir=$(bindir) $(REGRESS_OPTS) --prehook=pljava_examples $(REGRESS)
 
 localconfig:
 	gpconfig -c pljava_classpath -v $(PROJDIR)/target/

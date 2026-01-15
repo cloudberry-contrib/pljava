@@ -12,7 +12,9 @@
  */
 package org.postgresql.pljava.sqlj;
 
+import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
 
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
@@ -21,6 +23,7 @@ import static java.lang.invoke.MethodType.methodType;
 
 import java.net.MalformedURLException;
 import java.net.URL;
+import java.net.URLClassLoader;
 
 import java.security.CodeSigner;
 import java.security.CodeSource;
@@ -37,8 +40,10 @@ import java.sql.Statement;
 import java.util.Collections;
 import java.util.Enumeration;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.NoSuchElementException;
+import java.util.Set;
 
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -53,6 +58,7 @@ import org.postgresql.pljava.internal.Oid;
 import static org.postgresql.pljava.internal.Privilege.doPrivileged;
 import static org.postgresql.pljava.internal.UncheckedException.unchecked;
 
+import org.postgresql.pljava.jdbc.Invocation;
 import static org.postgresql.pljava.jdbc.SQLUtils.getDefaultConnection;
 
 /*
@@ -140,6 +146,9 @@ public class Loader extends ClassLoader
 		Map<Identifier.Simple, Map<Oid, Class<? extends SQLData>>>
 			s_typeMap = new HashMap<>();
 
+	private static final Object s_fallbackLoaderLock = new Object();
+	private static volatile ClassLoader s_fallbackLoader;
+
 	/**
 	 * Removes all cached schema loaders, functions, and type maps. This
 	 * method is called by the utility functions that manipulate the
@@ -151,6 +160,163 @@ public class Loader extends ClassLoader
 		s_schemaLoaders.clear();
 		s_typeMap.clear();
 		Backend.clearFunctionCache();
+		s_fallbackLoader = null;
+	}
+
+	private static boolean isMissingSqlj(SQLException e)
+	{
+		for (SQLException ex = e; ex != null; ex = ex.getNextException())
+		{
+			String state = ex.getSQLState();
+			if ("42P01".equals(state) || "3F000".equals(state))
+				return true;
+		}
+		return false;
+	}
+
+	private static ClassLoader getFallbackLoader()
+	{
+		ClassLoader loader = s_fallbackLoader;
+		if ( loader != null )
+			return loader;
+
+		synchronized ( s_fallbackLoaderLock )
+		{
+			loader = s_fallbackLoader;
+			if ( loader != null )
+				return loader;
+
+			Set<URL> urls = new LinkedHashSet<>();
+			addPathUrls(safeGetConfigOption("pljava_classpath"), urls);
+			if ( urls.isEmpty() )
+				loader = ClassLoader.getSystemClassLoader();
+			else
+				loader = doPrivileged(() -> new FallbackClassLoader(
+					urls.toArray(new URL[0]),
+					ClassLoader.getSystemClassLoader()));
+			s_fallbackLoader = loader;
+			return loader;
+		}
+	}
+
+	private static final class FallbackClassLoader extends URLClassLoader
+	{
+		FallbackClassLoader(URL[] urls, ClassLoader parent)
+		{
+			super(urls, parent);
+		}
+
+		@Override
+		public URL getResource(String name)
+		{
+			return doPrivileged(() -> super.getResource(name));
+		}
+
+		@Override
+		public InputStream getResourceAsStream(String name)
+		{
+			return doPrivileged(() -> {
+				URL url = super.getResource(name);
+				if ( url == null )
+					return null;
+				try
+				{
+					return url.openStream();
+				}
+				catch ( IOException e )
+				{
+					return null;
+				}
+			});
+		}
+	}
+
+	private static String safeGetConfigOption(String key)
+	{
+		if ( key == null || key.trim().isEmpty() )
+			return null;
+
+		try ( PreparedStatement stmt = getDefaultConnection()
+			.prepareStatement(
+				"SELECT pg_catalog.current_setting(?, true)") )
+		{
+			stmt.unwrap(SPIReadOnlyControl.class).clearReadOnly();
+			stmt.setString(1, key);
+			try ( ResultSet rs = stmt.executeQuery() )
+			{
+				if ( rs.next() )
+					return rs.getString(1);
+			}
+			return null;
+		}
+		catch ( SQLException e )
+		{
+			throw unchecked(e);
+		}
+	}
+
+	private static void addPathUrls(String path, Set<URL> urls)
+	{
+		if ( path == null || path.trim().isEmpty() )
+			return;
+
+		String[] parts =
+			path.split(java.util.regex.Pattern.quote(File.pathSeparator));
+		for ( String part : parts )
+		{
+			String entry = part.trim();
+			if ( entry.isEmpty() )
+				continue;
+			File file = new File(entry);
+			try
+			{
+				if ( file.isDirectory() )
+				{
+					urls.add(file.toURI().toURL());
+					File[] jarFiles = file.listFiles((dir, name) ->
+						name.endsWith(".jar"));
+					if ( jarFiles == null )
+						continue;
+					for ( File jar : jarFiles )
+						urls.add(jar.toURI().toURL());
+				}
+				else if ( file.isFile() )
+				{
+					urls.add(file.toURI().toURL());
+				}
+			}
+			catch ( MalformedURLException e )
+			{
+				throw unchecked(e);
+			}
+		}
+	}
+
+	private static boolean sqljTablesExist(Connection conn)
+	throws SQLException
+	{
+		return sqljTableExists(conn, "jar_repository")
+			&& sqljTableExists(conn, "classpath_entry")
+			&& sqljTableExists(conn, "jar_entry");
+	}
+
+	private static boolean sqljTableExists(Connection conn, String tableName)
+	throws SQLException
+	{
+		try ( PreparedStatement stmt = conn.prepareStatement(
+			"SELECT 1 FROM pg_catalog.pg_class c " +
+			"JOIN pg_catalog.pg_namespace n " +
+			"ON n.oid OPERATOR(pg_catalog.=) c.relnamespace " +
+			"WHERE n.nspname OPERATOR(pg_catalog.=) 'sqlj' " +
+			"AND c.relname OPERATOR(pg_catalog.=) ?"))
+		{
+			stmt.unwrap(SPIReadOnlyControl.class).clearReadOnly();
+			stmt.setString(1, tableName);
+			try ( ResultSet rs = stmt.executeQuery() )
+			{
+				return rs.next();
+			}
+		}
 	}
 
 	/**
@@ -191,7 +357,17 @@ public class Loader extends ClassLoader
 
 		ClassLoader loader = s_schemaLoaders.get(schema);
 		if(loader != null)
-			return loader;
+		{
+			if ( loader instanceof Loader )
+			{
+				Connection conn = getDefaultConnection();
+				if ( sqljTablesExist(conn) )
+					return loader;
+				s_schemaLoaders.remove(schema);
+			}
+			else
+				return loader;
+		}
 
 		/*
 		 * Under-construction map from an entry name to an array of integer
@@ -206,6 +382,12 @@ public class Loader extends ClassLoader
 		Map<Integer,CodeSource> codeSources = new HashMap<>();
 
 		Connection conn = getDefaultConnection();
+		if ( ! sqljTablesExist(conn) )
+		{
+			loader = getFallbackLoader();
+			s_schemaLoaders.put(schema, loader);
+			return loader;
+		}
 		try (
 			// Read the entries so that the one with highest prio is read last.
 			//
@@ -261,16 +443,27 @@ public class Loader extends ClassLoader
 				throw unchecked(e);
 			}
 		}
+		catch (SQLException e)
+		{
+			if (isMissingSqlj(e))
+			{
+				Invocation.clearErrorCondition();
+				loader = getFallbackLoader();
+				s_schemaLoaders.put(schema, loader);
+				return loader;
+			}
+			throw e;
+		}
 
 		ClassLoader parent = ClassLoader.getSystemClassLoader();
 		if(classImages.size() == 0)
 			//
 			// No classpath defined for the schema. Default to
-			// classpath of public schema or to the system classloader if the
+			// classpath of public schema or to the fallback loader if the
 			// request already is for the public schema.
 			//
 			loader = schema.equals(PUBLIC_SCHEMA)
-				? parent : getSchemaLoader(PUBLIC_SCHEMA);
+				? getFallbackLoader() : getSchemaLoader(PUBLIC_SCHEMA);
 		else
 		{
 			String name = "schema:" + schema.nonFolded();
@@ -347,6 +540,17 @@ public class Loader extends ClassLoader
 				typesForSchema = Map.of();
 			s_typeMap.put(schema, typesForSchema);
 			return typesForSchema;
+		}
+		catch (SQLException e)
+		{
+			if (isMissingSqlj(e))
+			{
+				Invocation.clearErrorCondition();
+				typesForSchema = Map.of();
+				s_typeMap.put(schema, typesForSchema);
+				return typesForSchema;
+			}
+			throw e;
 		}
 	}
 
@@ -480,6 +684,7 @@ public class Loader extends ClassLoader
 			}
 			catch(SQLException e)
 			{
+				Invocation.clearErrorCondition();
 				Logger.getAnonymousLogger().log(Level.INFO,
 					"Failed to load class", e);
 				throw new ClassNotFoundException(name + " due to: " +

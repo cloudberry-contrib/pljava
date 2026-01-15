@@ -16,13 +16,14 @@ import java.lang.invoke.MethodType;
 import static java.lang.invoke.MethodType.methodType;
 
 import java.security.AccessControlContext;
+import java.security.AccessControlException;
+import java.security.Permission;
 import static java.security.AccessController.doPrivileged;
 import java.security.PrivilegedAction;
 
 import java.sql.SQLData;
 import java.sql.SQLException;
 import java.sql.SQLNonTransientException;
-import java.sql.SQLSyntaxErrorException;
 import java.sql.SQLInput;
 import java.sql.SQLOutput;
 
@@ -331,12 +332,17 @@ class EntryPoints
 		if ( t instanceof SQLException )
 			throw (SQLException)t;
 
+		if ( t instanceof AccessControlException )
+		{
+			Permission perm = ((AccessControlException)t).getPermission();
+			if ( perm != null )
+				throw new SecurityException(
+					perm.getActions() + " on " + perm.getName(), t);
+			throw (AccessControlException)t;
+		}
+
 		if ( t instanceof SecurityException )
-			/*
-			 * Yes, SQL and JDBC lump syntax errors and access violations
-			 * together, and this is the right exception class for 42xxx.
-			 */
-			throw new SQLSyntaxErrorException(t.getMessage(), "42501", t);
+			throw (SecurityException)t;
 
 		throw new SQLException(t.getMessage(), t);
 	}

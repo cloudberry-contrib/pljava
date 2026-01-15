@@ -40,12 +40,14 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.sql.Types.VARCHAR;
 
 import org.postgresql.pljava.jdbc.SQLUtils;
+import org.postgresql.pljava.jdbc.SPIReadOnlyControl;
 import org.postgresql.pljava.management.SQLDeploymentDescriptor;
 import org.postgresql.pljava.nopolicy.FrozenProperties;
 import org.postgresql.pljava.policy.TrialPolicy;
 import static org.postgresql.pljava.annotation.processing.DDRWriter.eQuote;
 import static org.postgresql.pljava.elog.ELogHandler.LOG_WARNING;
 import static org.postgresql.pljava.internal.Backend.WITHOUT_ENFORCEMENT;
+import static org.postgresql.pljava.internal.UncheckedException.unchecked;
 import static org.postgresql.pljava.sqlgen.Lexicals.Identifier.Simple;
 
 /**
@@ -381,6 +383,27 @@ public class InstallHelper
 		"To enforce security policy in Java 18 through 23, the setting " +
 		"-Djava.security.manager=allow must be added in pljava.vmoptions. ";
 
+	private static boolean isGpdb()
+	{
+		try (
+			Connection c = SQLUtils.getDefaultConnection();
+			PreparedStatement stmt = c.prepareStatement(
+				"SELECT pg_catalog.current_setting(?, true)")
+		)
+		{
+			stmt.unwrap(SPIReadOnlyControl.class).clearReadOnly();
+			stmt.setString(1, "gp_session_role");
+			try ( ResultSet rs = stmt.executeQuery() )
+			{
+				return rs.next() && rs.getString(1) != null;
+			}
+		}
+		catch ( SQLException e )
+		{
+			throw unchecked(e);
+		}
+	}
+
 	/**
 	 * When PL/Java is loaded as an end-in-itself (that is, by {@code LOAD}
 	 * on its own or from its extension script on {@code CREATE EXTENSION} or
@@ -655,14 +678,18 @@ public class InstallHelper
 	private static void languages( Connection c, Statement s)
 	throws SQLException
 	{
+		String validatorClause = "";
+		if ( ! isGpdb() )
+			validatorClause = " VALIDATOR sqlj.java_validator";
+
 		boolean created = false;
 		Savepoint p = null;
 		try
 		{
 			p = c.setSavepoint();
 			s.execute(
-				"CREATE TRUSTED LANGUAGE java HANDLER sqlj.java_call_handler " +
-				"VALIDATOR sqlj.java_validator");
+				"CREATE TRUSTED LANGUAGE java HANDLER sqlj.java_call_handler" +
+				validatorClause);
 			created = true;
 			s.execute(
 				"COMMENT ON LANGUAGE java IS '" +
@@ -681,16 +708,19 @@ public class InstallHelper
 		if ( ! created ) /* existed already but may need validator added */
 			s.execute(
 				"CREATE OR REPLACE " +
-				"TRUSTED LANGUAGE java HANDLER sqlj.java_call_handler " +
-				"VALIDATOR sqlj.java_validator");
+				"TRUSTED LANGUAGE java HANDLER sqlj.java_call_handler" +
+				validatorClause);
+
+		if ( ! validatorClause.isEmpty() )
+			validatorClause = " VALIDATOR sqlj.javau_validator";
 
 		created = false;
 		try
 		{
 			p = c.setSavepoint();
 			s.execute(
-				"CREATE LANGUAGE javaU HANDLER sqlj.javau_call_handler " +
-				"VALIDATOR sqlj.javau_validator");
+				"CREATE LANGUAGE javaU HANDLER sqlj.javau_call_handler" +
+				validatorClause);
 			created = true;
 			s.execute(
 				"COMMENT ON LANGUAGE javau IS '" +
@@ -708,8 +738,8 @@ public class InstallHelper
 		if ( ! created ) /* existed already but may need validator added */
 			s.execute(
 				"CREATE OR REPLACE " +
-				"LANGUAGE javaU HANDLER sqlj.javau_call_handler " +
-				"VALIDATOR sqlj.javau_validator");
+				"LANGUAGE javaU HANDLER sqlj.javau_call_handler" +
+				validatorClause);
 	}
 
 	/**

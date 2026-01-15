@@ -27,6 +27,9 @@
 #include <catalog/catalog.h>
 #include <catalog/pg_proc.h>
 #include <catalog/pg_type.h>
+#ifdef GP_VERSION_NUM
+#include <cdb/cdbvars.h>
+#endif
 
 #if PG_VERSION_NUM >= 120000
  #if defined(HAVE_DLOPEN)  ||  PG_VERSION_NUM >= 160000 && ! defined(WIN32)
@@ -180,6 +183,7 @@ typedef struct {
 } JVMOptList;
 
 static jint initializeJavaVM(JVMOptList*);
+static char *get_jni_errmsg(jint jnicode);
 static void JVMOptList_init(JVMOptList*);
 static void JVMOptList_delete(JVMOptList*);
 static void JVMOptList_add(JVMOptList*, const char*, void*, bool);
@@ -194,6 +198,7 @@ static void _destroyJavaVM(int, Datum);
 static void initPLJavaClasses(void);
 static void initJavaSession(void);
 static void reLogWithChangedLevel(int);
+static void registerGUCOptions(void);
 
 #ifndef WIN32
 #define USE_PLJAVA_SIGHANDLERS
@@ -723,8 +728,8 @@ static void initsequencer(enum initstage is, bool tolerant)
 				"jint wider than long int?!");
 			ereport(WARNING,
 				(errmsg("failed to create Java virtual machine"),
-				 errdetail("JNI_CreateJavaVM returned an error code: %ld",
-					(long int)JNIresult),
+				 errdetail("JNI_CreateJavaVM returned an error code: %ld (%s)",
+					(long int)JNIresult, get_jni_errmsg(JNIresult)),
 				 jvmStartedAtLeastOnce ?
 					errhint("Because an earlier attempt during this session "
 					"did start a VM before failing, this probably means your "
@@ -971,6 +976,9 @@ void _PG_init()
 			"PL/Java cannot determine the path separator this platform uses");
 	s_path_var_sep = *sep;
 
+	if ( IS_FORMLESS_VOID == initstage )
+		registerGUCOptions();
+
 	if ( InstallHelper_shouldDeferInit() )
 		deferInit = true;
 	else
@@ -993,11 +1001,6 @@ static void initPLJavaClasses(void)
 		"isReleaseLingeringSavepoints",
 	  	"()Z",
 	  	Java_org_postgresql_pljava_internal_Backend_isReleaseLingeringSavepoints
-		},
-		{
-		"_getLibraryPath",
-		"()Ljava/lang/String;",
-		Java_org_postgresql_pljava_internal_Backend__1getLibraryPath
 		},
 		{
 		"_getConfigOption",
@@ -2028,6 +2031,12 @@ static Datum internalValidator(bool trusted, PG_FUNCTION_ARGS)
 	Oid funcoid = PG_GETARG_OID(0);
 	Invocation ctx;
 	Oid *oidSaveLocation = NULL;
+
+#ifdef GP_VERSION_NUM
+	/* QEs should not run validator logic that can do DDL. */
+	if ( ! IS_QD_OR_SINGLENODE() )
+		PG_RETURN_VOID();
+#endif
 
 	bool ok = CheckFunctionValidatorAccess(fcinfo->flinfo->fn_oid, funcoid);
 	/*

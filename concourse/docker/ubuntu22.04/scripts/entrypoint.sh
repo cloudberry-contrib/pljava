@@ -60,23 +60,24 @@ install_pljava_build_deps() {
   sudo apt-get update
   sudo apt-get install -y curl wget tar gcc g++ make libkrb5-dev openssl libssl-dev
 
-  # PL/Java 1.5.x in this fork uses maven-compiler-plugin source/target=6, so build with JDK8.
-  sudo apt-get install -y openjdk-8-jdk
+  # PL/Java 1.6.x requires Java 9+, use the Cloudberry-aligned JDK 11 LTS.
+  sudo apt-get install -y openjdk-11-jdk
 }
 
-setup_java8() {
-  local java8_home=""
-  for candidate in /usr/lib/jvm/java-8-openjdk-*; do
+setup_java() {
+  local java_major="${JAVA_MAJOR:-11}"
+  local java_home=""
+  for candidate in /usr/lib/jvm/java-${java_major}-openjdk-*; do
     if [ -d "${candidate}" ]; then
-      java8_home="${candidate}"
+      java_home="${candidate}"
       break
     fi
   done
-  if [ -z "${java8_home}" ]; then
-    die "could not find Java 8 under /usr/lib/jvm (is openjdk-8-jdk installed?)"
+  if [ -z "${java_home}" ]; then
+    die "could not find Java ${java_major} under /usr/lib/jvm (is openjdk-${java_major}-jdk installed?)"
   fi
 
-  export JAVA_HOME="${JAVA_HOME:-${java8_home}}"
+  export JAVA_HOME="${JAVA_HOME:-${java_home}}"
   export PATH="${JAVA_HOME}/bin:${PATH}"
   java -version
 }
@@ -126,6 +127,14 @@ configure_pljava_runtime() {
   jvm_jli_dir="${jvm_lib_dir}/jli"
   export LD_LIBRARY_PATH="${jvm_server_dir}:${jvm_lib_dir}:${jvm_jli_dir}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
+  log "configure PL/Java runtime GUCs"
+  gpconfig --skipvalidation -c pljava.libjvm_location -v "'${libjvm}'"
+  local module_path="${PLJAVA_SRC}/target/pljava.jar:${PLJAVA_SRC}/target/pljava-api.jar"
+  if [ -f "${PLJAVA_SRC}/target/examples.jar" ]; then
+    module_path="${module_path}:${PLJAVA_SRC}/target/examples.jar"
+  fi
+  gpconfig --skipvalidation -c pljava.module_path -v "'${module_path}'"
+
   gpstop -arf
 }
 
@@ -156,7 +165,7 @@ run_pljava_test_only() {
   source_cbdb_env
   wait_for_cbdb
   install_pljava_build_deps
-  setup_java8
+  setup_java
   setup_maven
   configure_pljava_runtime
   test_pljava
@@ -166,7 +175,7 @@ run_pljava_build_only() {
   source_cbdb_env
   wait_for_cbdb
   install_pljava_build_deps
-  setup_java8
+  setup_java
   setup_maven
   build_pljava
 }
@@ -177,7 +186,7 @@ main() {
   source_cbdb_env
   wait_for_cbdb
   install_pljava_build_deps
-  setup_java8
+  setup_java
   setup_maven
   build_and_test_pljava
   log "done"

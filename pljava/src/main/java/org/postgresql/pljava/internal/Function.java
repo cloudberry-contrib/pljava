@@ -302,7 +302,8 @@ public class Function
 	private static MethodHandle getMethodHandle(
 		ClassLoader schemaLoader, Class<?> clazz, String methodName,
 		AccessControlContext acc, boolean commute,
-		String[] jTypes, boolean retTypeIsOutParameter, boolean isMultiCall)
+		String[] jTypes, boolean retTypeIsOutParameter, boolean isMultiCall,
+		boolean[] returnTypeAdjusted)
 	throws SQLException
 	{
 		MethodType mt =
@@ -321,6 +322,8 @@ public class Function
 
 		MethodType origMT = mt;
 		Class<?> altType = null;
+		boolean adjustReturnType = false;
+		boolean wrapWithPicker = false;
 		Class<?> realRetType =
 			loadClass(schemaLoader, jTypes[jTypes.length-1], acc);
 
@@ -334,6 +337,16 @@ public class Function
 		{
 			altType = methodType(realRetType).wrap().returnType();
 			realRetType = altType;
+			adjustReturnType = true;
+		}
+		else if ( realRetType.isArray()
+			&& realRetType.getComponentType().isPrimitive() )
+		{
+			Class<?> boxed =
+				methodType(realRetType.getComponentType()).wrap().returnType();
+			altType = java.lang.reflect.Array.newInstance(boxed, 0).getClass();
+			realRetType = altType;
+			adjustReturnType = true;
 		}
 
 		/* COPIED COMMENT:
@@ -343,7 +356,10 @@ public class Function
 		 * return type anyway.
 		 */
 		if ( ResultSet.class == realRetType )
+		{
 			altType = realRetType;
+			wrapWithPicker = true;
+		}
 
 		if ( null != altType )
 		{
@@ -354,7 +370,11 @@ public class Function
 			{
 				MethodHandle h =
 					lookupFor(clazz).findStatic(clazz, methodName, mt);
-				return filterReturnValue(h, s_wrapWithPicker);
+				if ( returnTypeAdjusted != null )
+					returnTypeAdjusted[0] = adjustReturnType;
+				return wrapWithPicker
+					? filterReturnValue(h, s_wrapWithPicker)
+					: h;
 			}
 			catch ( ReflectiveOperationException e )
 			{
@@ -1438,11 +1458,20 @@ public class Function
 
 		String methodName = info.group("meth");
 
+		boolean[] returnTypeAdjusted = new boolean[] { false };
 		MethodHandle handle =
 			getMethodHandle(schemaLoader, clazz, methodName,
 				null, // or acc to initialize parameter classes; overkill.
-				commute, resolvedTypes, retTypeIsOutParameter, isMultiCall)
+				commute, resolvedTypes, retTypeIsOutParameter, isMultiCall,
+				returnTypeAdjusted)
 			.asFixedArity();
+		if ( returnTypeAdjusted[0] )
+		{
+			String explicitReturnType =
+				resolvedTypes[resolvedTypes.length - 1];
+			doInPG(() -> _reconcileTypes(wrappedPtr, resolvedTypes,
+				new String[] { explicitReturnType }, -2));
+		}
 		MethodType mt = handle.type();
 
 		if ( commute )

@@ -17,6 +17,7 @@ import java.nio.charset.Charset;
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Savepoint;
 import java.sql.Statement;
 import java.util.HashMap;
 import static java.util.Objects.requireNonNull;
@@ -240,17 +241,27 @@ public class Session implements org.postgresql.pljava.Session
 			ResultSet rs = null;
 			AclId outerUser = AclId.getOuterUser();
 			AclId effectiveUser = AclId.getUser();
+			Savepoint sp = null;
 			boolean wasLocalChange = false;
 			boolean changeSucceeded = false;
 			try
 			{
 				wasLocalChange = _setUser(outerUser, true);
 				changeSucceeded = true;
+				sp = conn.setSavepoint();
 				if(stmt.execute(statement))
 				{
 					rs = stmt.getResultSet();
 					rs.next();
 				}
+				conn.releaseSavepoint(sp);
+				sp = null;
+			}
+			catch ( SQLException sqle )
+			{
+				if ( null != sp )
+					conn.rollback(sp);
+				throw sqle;
 			}
 			finally
 			{

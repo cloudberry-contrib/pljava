@@ -28,6 +28,10 @@
 #include <utils/snapmgr.h>
 #include <utils/syscache.h>
 
+#ifdef GP_VERSION_NUM
+#include <cdb/cdbvars.h>
+#endif
+
 #if PG_VERSION_NUM >= 120000
 #include <catalog/pg_namespace.h>
 #define GetNamespaceOid(k1) \
@@ -218,6 +222,10 @@ static void checkLoadPath()
 
 static void getExtensionLoadPath()
 {
+#ifdef GP_VERSION_NUM
+	if ( ! IS_QD_OR_SINGLENODE() )
+		return;
+#endif
 	MemoryContext curr;
 	Datum dtm;
 	bool isnull;
