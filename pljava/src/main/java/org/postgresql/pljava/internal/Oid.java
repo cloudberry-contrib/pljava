@@ -1,11 +1,20 @@
 /*
- * Copyright (c) 2004, 2005, 2006 TADA AB - Taby Sweden
- * Distributed under the terms shown in the file COPYRIGHT
- * found in the root folder of this project or at
- * http://eng.tada.se/osprojects/COPYRIGHT.html
+ * Copyright (c) 2004-2019 Tada AB and other contributors, as listed below.
+ *
+ * All rights reserved. This program and the accompanying materials
+ * are made available under the terms of the The BSD 3-Clause License
+ * which accompanies this distribution, and is available at
+ * http://opensource.org/licenses/BSD-3-Clause
+ *
+ * Contributors:
+ *   Tada AB
+ *   Chapman Flack
  */
 package org.postgresql.pljava.internal;
 
+import static org.postgresql.pljava.internal.Backend.doInPG;
+
+import java.sql.SQLData;
 import java.sql.SQLException;
 import java.util.HashMap;
 
@@ -18,32 +27,22 @@ import java.util.HashMap;
  */
 public class Oid extends Number
 {
-	private static final HashMap s_class2typeId = new HashMap();
+	private static final HashMap<Class<?>,Oid> s_class2typeId =
+		new HashMap<>();
 
-	private static final HashMap s_typeId2class = new HashMap();
-	static
-	{
-		try
-		{
-			// Ensure that the SPI JDBC driver is loaded and registered
-			// with the java.sql.DriverManager.
-			//
-			Class.forName("org.postgresql.pljava.jdbc.SPIDriver");
-		}
-		catch(ClassNotFoundException e)
-		{
-			throw new ExceptionInInitializerError(e);
-		}
-	}
+	private static final HashMap<Oid,Class<?>> s_typeId2class =
+		new HashMap<>();
 
 	/**
-	 * Finds the PostgreSQL well known Oid for the given class.
-	 * @param clazz The class.
+	 * Finds the PostgreSQL well known Oid for the given Java object.
+	 * @param obj The object.
 	 * @return The well known Oid or null if no such Oid could be found.
 	 */
-	public static Oid forJavaClass(Class clazz)
+	public static Oid forJavaObject(Object obj) throws SQLException
 	{
-		return (Oid)s_class2typeId.get(clazz);
+		if ( obj instanceof SQLData )
+			return forTypeName(((SQLData)obj).getSQLTypeName());
+		return s_class2typeId.get(obj.getClass());
 	}
 
 	/**
@@ -55,10 +54,7 @@ public class Oid extends Number
 	public static Oid forTypeName(String typeString)
 	throws SQLException
 	{
-		synchronized(Backend.THREADLOCK)
-		{
-			return new Oid(_forTypeName(typeString));
-		}
+		return doInPG(() -> new Oid(_forTypeName(typeString)));
 	}
 
 	/**
@@ -69,10 +65,7 @@ public class Oid extends Number
 	public static Oid forSqlType(int sqlType)
 	throws SQLException
 	{
-		synchronized(Backend.THREADLOCK)
-		{
-			return new Oid(_forSqlType(sqlType));
-		}
+		return doInPG(() -> new Oid(_forSqlType(sqlType)));
 	}
 
 	/**
@@ -80,10 +73,7 @@ public class Oid extends Number
 	 */
 	public static Oid getTypeId()
 	{
-		synchronized(Backend.THREADLOCK)
-		{
-			return _getTypeId();
-		}
+		return doInPG(Oid::_getTypeId);
 	}
 
 	/**
@@ -136,26 +126,29 @@ public class Oid extends Number
 	public Class getJavaClass()
 	throws SQLException
 	{
-		Class c = (Class)s_typeId2class.get(this);
-		if(c == null)
+		Class c = s_typeId2class.get(this);
+		if(c != null)
+			return c;
+		return doInPG(() ->
 		{
-			String className;
-			synchronized(Backend.THREADLOCK)
-			{
-				className = _getJavaClassName(m_native);
-			}
+			String className = _getJavaClassName(m_native);
+			ClassLoader loader = _getCurrentLoader();
+			Class cc;
 			try
 			{
-				c = Class.forName(getCanonicalClassName(className, 0));
+				String canonName = getCanonicalClassName(className, 0);
+				if ( null == loader )
+					loader = getClass().getClassLoader();
+				cc = Class.forName(canonName, true, loader);
 			}
 			catch(ClassNotFoundException e)
 			{
 				throw new SQLException(e.getMessage());
 			}
-			s_typeId2class.put(this, c);
-			s_class2typeId.put(c, this);
-		}
-		return c;
+			s_typeId2class.put(this, cc);
+			s_class2typeId.put(cc, this);
+			return cc;
+		});
 	}
 
 	/**
@@ -237,5 +230,13 @@ public class Oid extends Number
 	private native static Oid _getTypeId();
 
 	private native static String _getJavaClassName(int nativeOid)
+	throws SQLException;
+
+	/**
+	 * Return the (initiating, "schema") ClassLoader of the innermost
+	 * currently-executing PL/Java function, or null if there is none or the
+	 * schema loaders have since been cleared and the loader is gone.
+	 */
+	private native static ClassLoader _getCurrentLoader()
 	throws SQLException;
 }

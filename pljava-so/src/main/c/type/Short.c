@@ -1,12 +1,15 @@
 /*
- * Copyright (c) 2004, 2005, 2006 TADA AB - Taby Sweden
- * Copyright (c) 2010, 2011 PostgreSQL Global Development Group
+ * Copyright (c) 2004-2020 Tada AB and other contributors, as listed below.
  *
- * Distributed under the terms shown in the file COPYRIGHT
- * found in the root folder of this project or at
- * http://wiki.tada.se/index.php?title=PLJava_License
+ * All rights reserved. This program and the accompanying materials
+ * are made available under the terms of the The BSD 3-Clause License
+ * which accompanies this distribution, and is available at
+ * http://opensource.org/licenses/BSD-3-Clause
  *
- * @author Thomas Hallgren
+ * Contributors:
+ *   Tada AB
+ *   PostgreSQL Global Development Group
+ *   Chapman Flack
  */
 #include "pljava/type/Type_priv.h"
 #include "pljava/type/Array.h"
@@ -14,16 +17,15 @@
 
 static TypeClass s_shortClass;
 static jclass    s_Short_class;
-static jclass    s_ShortArray_class;
 static jmethodID s_Short_init;
 static jmethodID s_Short_shortValue;
 
 /*
  * short primitive type.
  */
-static Datum _short_invoke(Type self, jclass cls, jmethodID method, jvalue* args, PG_FUNCTION_ARGS)
+static Datum _short_invoke(Type self, Function fn, PG_FUNCTION_ARGS)
 {
-	jshort v = JNI_callStaticShortMethodA(cls, method, args);
+	jshort v = pljava_Function_shortInvoke(fn);
 	return Int16GetDatum(v);
 }
 
@@ -74,19 +76,8 @@ static Datum _shortArray_coerceObject(Type self, jobject shortArray)
 	nElems = JNI_getArrayLength((jarray)shortArray);
 	v = createArrayType(nElems, sizeof(jshort), INT2OID, false);
 
-	if(!JNI_isInstanceOf( shortArray, s_ShortArray_class))
-	  JNI_getShortArrayRegion((jshortArray)shortArray, 0, nElems, (jshort*)ARR_DATA_PTR(v));
-	else
-	  {
-	    int idx = 0;
-	    jshort *array = (jshort*)ARR_DATA_PTR(v);
-
-	    for(idx = 0; idx < nElems; ++idx)
-	      {
-		array[idx] = JNI_callShortMethod(JNI_getObjectArrayElement(shortArray, idx),
-					       s_Short_shortValue);
-	      }
-	  }
+	JNI_getShortArrayRegion(
+			(jshortArray)shortArray, 0, nElems, (jshort*)ARR_DATA_PTR(v));
 
 	PG_RETURN_ARRAYTYPE_P(v);
 }
@@ -127,7 +118,6 @@ void Short_initialize(void)
 	TypeClass cls;
 
 	s_Short_class = JNI_newGlobalRef(PgObject_getJavaClass("java/lang/Short"));
-	s_ShortArray_class = JNI_newGlobalRef(PgObject_getJavaClass("[Ljava/lang/Short;"));
 	s_Short_init = PgObject_getJavaMethod(s_Short_class, "<init>", "(S)V");
 	s_Short_shortValue = PgObject_getJavaMethod(s_Short_class, "shortValue", "()S");
 

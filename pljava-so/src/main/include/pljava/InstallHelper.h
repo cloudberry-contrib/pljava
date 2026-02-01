@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015 Tada AB and other contributors, as listed below.
+ * Copyright (c) 2015-2021 Tada AB and other contributors, as listed below.
  *
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the The BSD 3-Clause License
@@ -17,6 +17,15 @@
  * values that aren't more directly exposed), so those internal .h files can be
  * included only in InstallHelper.c and will not clutter most other code.
  */
+
+/*
+ * CppAsString2 first appears in PG8.4.  Once the compatibility target reaches
+ * 8.4, this fallback will not be needed. Used in InstallHelper and Backend,
+ * both of which include this file.
+ */
+#ifndef CppAsString2
+#define CppAsString2(x) CppAsString(x)
+#endif
 
 /*
  * The path from which this library is being loaded, which is surprisingly
@@ -55,30 +64,38 @@ extern bool pljavaLoadingAsExtension;
  * isPLJavaFunction can use the stashed information to determine whether an
  * arbitrary function Oid is a function built on PL/Java, without relying on
  * assumptions about the language name, etc.
+ *
+ * It can return the language name and/or trusted flag if non-null pointers
+ * are supplied, as it will be looking up the language anyway.
  */
-extern char *pljavaFnOidToLibPath(Oid fn);
+extern char *pljavaFnOidToLibPath(Oid fn, char **langName, bool *trusted);
 
 extern Oid pljavaTrustedOid, pljavaUntrustedOid;
 
-extern bool InstallHelper_isPLJavaFunction(Oid fn);
+extern bool InstallHelper_isPLJavaFunction(
+	Oid fn, char **langName, bool *trusted);
 
 /*
  * Return the name of the current database, from MyProcPort ... don't free it.
+ * In a background or autovacuum worker, there's no MyProcPort, and the name is
+ * found another way and strdup'd in TopMemoryContext. It'll keep; don't bother
+ * freeing it.
  */
-extern char *pljavaDbName();
+extern char *pljavaDbName(void);
 
 /*
  * Return the name of the cluster if it has been set (only possible in 9.5+),
  * or an empty string, never NULL.
  */
-extern char const *pljavaClusterName();
+extern char const *pljavaClusterName(void);
 
 /*
- * Construct a default for pljava.classpath ($sharedir/pljava/pljava-$VER.jar)
- * in pathbuf (which must have length at least MAXPGPATH), and return pathbuf,
- * or NULL if the constructed path would not fit.
+ * Construct a default for pljava.module_path ($sharedir/pljava/pljava-$VER.jar
+ * and pljava-api-$VER.jar) in pathbuf (which must have length at least
+ * MAXPGPATH), and return pathbuf, or NULL if the constructed path would not
+ * fit. (pathbuf, pathSepChar).
  */
-extern char const *InstallHelper_defaultClassPath(char *);
+extern char const *InstallHelper_defaultModulePath(char *, char);
 
 /*
  * Return true if in a 'viable' transaction (not aborted or abort pending).
@@ -101,10 +118,39 @@ extern char const *InstallHelper_defaultClassPath(char *);
  * and disrupt the abort. The trickiest bit was finding available API to
  * recognize the ABORT_PENDING cases.
  */
-extern bool pljavaViableXact();
+extern bool pljavaViableXact(void);
 
-extern char *InstallHelper_hello();
+/*
+ * Backend's initsequencer needs to know whether it's being called in a 9.3+
+ * background worker process, or during a pg_upgrade (in either case, the
+ * init sequence needs to be lazier). Those should both be simple tests of
+ * IsBackgroundWorker or IsBinaryUpgrade, except (wouldn't you know) for more
+ * version-specific Windows visibility issues, so the ugly details are in
+ * InstallHelper, and Backend just asks this nice function.
+ */
+extern bool InstallHelper_shouldDeferInit(void);
 
-extern void InstallHelper_groundwork();
+/*
+ * Emit a debug message as early as possible with the native code's version
+ * and build information. A nicer message is produced later by hello and
+ * includes both the native and Java versions, but that's too late if something
+ * goes wrong first.
+ */
+extern void InstallHelper_earlyHello(void);
 
-extern void InstallHelper_initialize();
+/*
+ * Perform early setup needed on every start (properties, security policy, etc.)
+ * and also construct and return a string of native code, Java code, and JVM
+ * version and build information, to be included in the "PL/Java loaded"
+ * message.
+ */
+extern char *InstallHelper_hello(void);
+
+/*
+ * Called only when the loading is directly due to CREATE EXTENSION or LOAD, and
+ * not simply to service a PL/Java function; checks for, and populates or brings
+ * up to date, as needed, the sqlj schema and its contents.
+ */
+extern void InstallHelper_groundwork(void);
+
+extern void InstallHelper_initialize(void);

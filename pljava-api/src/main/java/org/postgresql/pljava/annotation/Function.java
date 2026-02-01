@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2004-2013 Tada AB and other contributors, as listed below.
+ * Copyright (c) 2004-2022 Tada AB and other contributors, as listed below.
  *
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the The BSD 3-Clause License
@@ -65,13 +65,52 @@ category</a>
 	 */
 	enum Trust { SANDBOXED, UNSANDBOXED };
 
+	/** 
+	 * Whether the function is unsafe to use in any parallel query plan at all,
+	 * or avoids certain operations and can appear in such a plan but must be
+	 * executed only in the parallel group leader, or avoids an even larger
+	 * set of operations and is safe to execute anywhere in a parallel plan.
+	 */
+	enum Parallel { UNSAFE, RESTRICTED, SAFE };
+
 	/**
 	 * The element type in case the annotated function returns a
 	 * {@link org.postgresql.pljava.ResultSetProvider ResultSetProvider},
 	 * or can be used to specify the return type of any function if the
 	 * compiler hasn't inferred it correctly.
+	 *<p>
+	 * Only one of {@code type} or {@code out} may appear, except as described
+	 * for {@code out} below.
 	 */
 	String type() default "";
+
+	/**
+	 * The result column names and types of a composite-returning function.
+	 *<p>
+	 * This is for a function defining its own one-off composite type
+	 * (declared with {@code OUT} parameters). If the function returns some
+	 * composite type known to the catalog, simply use {@code type} and the name
+	 * of that type.
+	 *<p>
+	 * Each element is a name and a type specification, separated by whitespace.
+	 * An element that begins with whitespace declares an output column with no
+	 * name, only a type. The name is an ordinary SQL identifier; if it would
+	 * be quoted in SQL, naturally each double-quote must be represented as
+	 * {@code \"} in Java.
+	 *<p>
+	 * If there is exactly one {@code OUT} parameter declared, PostgreSQL treats
+	 * the function as returning that parameter's type, rather than
+	 * a one-element composite; therefore, the Java method must have the
+	 * corresponding form (returning the result type directly, or an
+	 * {@code Iterator} of that type, rather than expecting a {@code ResultSet}
+	 * final parameter.
+	 *<p>
+	 * If a one-element composite type is wanted, PL/Java will allow
+	 * {@code type="pg_catalog.RECORD"} along with a one-element {@code out},
+	 * and will generate the corresponding declaration in SQL. As of
+	 * this writing, however, no version of PostgreSQL will accept it.
+	 */
+	String[] out() default {};
 
 	/**
 	 * The name of the function. This is optional. The default is
@@ -85,15 +124,23 @@ category</a>
 	String schema() default "";
 
 	/**
+	 * Whether PostgreSQL should gather trailing arguments into an array that
+	 * will be bound to the last (non-output) Java parameter (which must have an
+	 * array type).
+	 * Appeared in PostgreSQL 8.4.
+	 */
+	boolean variadic() default false;
+
+	/**
 	 * Estimated cost in units of cpu_operator_cost.
-	 *
+	 *<p>
 	 * If left unspecified (-1) the backend's default will apply.
 	 */
 	int cost() default -1;
 
 	/**
 	 * Estimated number of rows returned (only for functions returning set).
-	 *
+	 *<p>
 	 * If left unspecified (-1) the backend's default will apply.
 	 */
 	int rows() default -1;
@@ -121,7 +168,7 @@ category</a>
 	
 	/**
 	 * What the query optimizer is allowed to assume about this function.
-	 *
+	 *<p>
 	 * IMMUTABLE describes a pure function whose return will always be the same
 	 * for the same parameter values, with no side effects and no dependency on
 	 * anything in the environment. STABLE describes a function that has no
@@ -138,6 +185,42 @@ category</a>
 	 * in the "untrusted" language instance.
 	 */
 	Trust trust() default Trust.SANDBOXED;
+
+	/**
+	 * The name of the PostgreSQL procedural language to which this function
+	 * should be declared, as an alternative to specifying {@link #trust trust}.
+	 *<p>
+	 * Ordinarily, PL/Java installs two procedural languages, {@code java} and
+	 * {@code javau}, and a function is declared in one or the other by giving
+	 * {@code trust} the value {@code SANDBOXED} or {@code UNSANDBOXED},
+	 * respectively. It is possible to declare other named procedural languages
+	 * sharing PL/Java's handler functions, and assign customized permissions
+	 * to them in {@code pljava.policy}. A function can be declared in the
+	 * specific language named with this element.
+	 *<p>
+	 * It is an error to specify both {@code language} and {@code trust} in
+	 * the same annotation.
+	 */
+	String language() default "";
+
+	/** 
+	 * Whether the function is <a id='parallel'>UNSAFE</a> to use in any
+	 * parallel query plan at all
+	 * (the default), or avoids all disqualifying operations and so is SAFE to
+	 * execute anywhere in a parallel plan, or, by avoiding <em>some</em> such
+	 * operations, may appear in parallel plans but RESTRICTED to execute only
+	 * on the parallel group leader. The operations that must be considered are
+	 * set out in <a href=
+'https://www.postgresql.org/docs/current/static/parallel-safety.html#PARALLEL-LABELING'
+>Parallel Labeling for Functions and Aggregates</a> in the PostgreSQL docs.
+	 *<p>
+	 * For much more on the practicalities of parallel query and PL/Java,
+	 * please see <a href=
+'../../../../../../../use/parallel.html'>the users' guide</a>.
+	 *<p>
+	 * Appeared in PostgreSQL 9.6.
+	 */
+	Parallel parallel() default Parallel.UNSAFE;
 	
 	/**
 	 * Whether the function can be safely pushed inside the evaluation of views
@@ -161,7 +244,7 @@ category</a>
 	 * configuration_parameter FROM CURRENT. The latter will ensure that the
 	 * function executes with the same setting for configuration_parameter that
 	 * was in effect when the function was created.
-	 * 
+	 *<p>
 	 * Appeared in PostgreSQL 8.3.
 	 */
 	String[] settings() default {};

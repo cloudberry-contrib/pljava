@@ -1,10 +1,14 @@
 /*
- * Copyright (c) 2004, 2005, 2006 TADA AB - Taby Sweden
- * Distributed under the terms shown in the file COPYRIGHT
- * found in the root folder of this project or at
- * http://eng.tada.se/osprojects/COPYRIGHT.html
+ * Copyright (c) 2004-2023 Tada AB and other contributors, as listed below.
  *
- * @author Thomas Hallgren
+ * All rights reserved. This program and the accompanying materials
+ * are made available under the terms of the The BSD 3-Clause License
+ * which accompanies this distribution, and is available at
+ * http://opensource.org/licenses/BSD-3-Clause
+ *
+ * Contributors:
+ *   Tada AB
+ *   Chapman Flack
  */
 #include <postgres.h>
 #include <fmgr.h>
@@ -26,34 +30,15 @@
 #include "pljava/HashMap.h"
 #include "pljava/SPI.h"
 
+#ifndef pg_unreachable
 #define pg_unreachable() abort()
-
-#if PG_VERSION_NUM < 80300
-typedef enum CoercionPathType
-{
-	COERCION_PATH_NONE, 		/* failed to find any coercion pathway */
-	COERCION_PATH_FUNC, 		/* apply the specified coercion function */
-	COERCION_PATH_RELABELTYPE,  /* binary-compatible cast, no function */
-	COERCION_PATH_ARRAYCOERCE,  /* need an ArrayCoerceExpr node */
-	COERCION_PATH_COERCEVIAIO	/* need a CoerceViaIO node */
-} CoercionPathType;
-
-static CoercionPathType fcp(Oid targetTypeId, Oid sourceTypeId,
-							CoercionContext ccontext, Oid *funcid);
-static CoercionPathType fcp(Oid targetTypeId, Oid sourceTypeId,
-							CoercionContext ccontext, Oid *funcid)
-{
-	if ( find_coercion_pathway(targetTypeId, sourceTypeId, ccontext, funcid) )
-		return *funcid != InvalidOid ?
-			COERCION_PATH_FUNC : COERCION_PATH_RELABELTYPE;
-	else
-		return COERCION_PATH_NONE;
-}
-#define find_coercion_pathway fcp
 #endif
 
-#if PG_VERSION_NUM < 90500
-#define DomainHasConstraints(x) true
+#if PG_VERSION_NUM < 110000
+static Oid BOOLARRAYOID;
+static Oid CHARARRAYOID;
+static Oid FLOAT8ARRAYOID;
+static Oid INT8ARRAYOID;
 #endif
 
 static HashMap s_typeByOid;
@@ -76,36 +61,109 @@ static jclass s_Iterator_class;
 static jmethodID s_Iterator_hasNext;
 static jmethodID s_Iterator_next;
 
-/* Structure used in multi function calls (calls returning
- * SETOF <composite type>)
+static jclass s_TypeBridge_Holder_class;
+static jmethodID s_TypeBridge_Holder_className;
+static jmethodID s_TypeBridge_Holder_defaultOid;
+static jmethodID s_TypeBridge_Holder_payload;
+
+/*
+ * Structure used to retain state of set-returning functions using the
+ * SFRM_ValuePerCall protocol (the only one PL/Java currently supports). In that
+ * protocol, PostgreSQL will make repeated calls arriving at Type_invokeSRF
+ * below, which returns one result row on each call (and then a no-more-results
+ * result). This struct holds necessary context through the sequence of calls.
+ *
+ * If PostgreSQL is satisfied before the whole set has been returned, the
+ * _endOfSetCB below will be invoked to clean up the work in progress, and also
+ * needs this stashed information.
  */
 typedef struct
 {
 	Type          elemType;
+	Function      fn;
 	jobject       rowProducer;
 	jobject       rowCollector;
+	/*
+	 * Invocation instance, if any, the Java counterpart to currentInvocation
+	 * the C struct. There isn't one unless it gets asked for, then if it is,
+	 * it's saved here, so even though the C currentInvocation really is new on
+	 * each entry from PG, Java will see one Invocation instance throughout the
+	 * sequence of calls.
+	 */
 	jobject       invocation;
-	MemoryContext rowContext;
+	/*
+	 * Two pieces of state from Invocation.c's management of SPI connection,
+	 * effectively keeping one such connection alive through the sequence of
+	 * calls. I could easily be led to question the advisability of even doing
+	 * that, but it has a long history in PL/Java, so changing it might call for
+	 * some careful analysis.
+	 */
 	MemoryContext spiContext;
 	bool          hasConnected;
-	bool          trusted;
 } CallContextData;
 
+/*
+ * Called during evaluation of a set-returning function, at various points after
+ * calls into Java code could have instantiated an Invocation, or connected SPI.
+ * Does not stash elemType, rowProducer, or rowCollector; those are all
+ * unconditionally set in the first-call initialization, and spiContext to zero.
+ */
+static void stashCallContext(CallContextData *ctxData)
+{
+	bool wasConnected = ctxData->hasConnected;
+
+	ctxData->hasConnected  = currentInvocation->hasConnected;
+
+	ctxData->invocation    = currentInvocation->invocation;
+
+	if ( wasConnected )
+		return;
+
+	/*
+	 * If SPI has been connected for the first time, capture the memory context
+	 * it imposed. Curiously, this is not used again except in _closeIteration.
+	 */
+	if(ctxData->hasConnected)
+		ctxData->spiContext = CurrentMemoryContext;
+}
+
+/*
+ * Called either at normal completion of a set-returning function, or by the
+ * _endOfSetCB if PostgreSQL doesn't want all the results.
+ */
 static void _closeIteration(CallContextData* ctxData)
 {
+	jobject dummy;
 	currentInvocation->hasConnected = ctxData->hasConnected;
 	currentInvocation->invocation   = ctxData->invocation;
 
-	Type_closeSRF(ctxData->elemType, ctxData->rowProducer);
+	/*
+	 * Why pass 1 as the call_cntr? We won't always have the actual call_cntr
+	 * value at _closeIteration time (the _endOfSetCB isn't passed it), and the
+	 * Java interfaces being used don't need it (close() isn't passed a row
+	 * number), but at least 1 is different from zero, in case vpcInvoke has
+	 * a reason to distinguish the first call (in the same invocation as the
+	 * overall setup) from subsequent ones.
+	 */
+	pljava_Function_vpcInvoke(
+		ctxData->fn, ctxData->rowProducer, NULL, 1, JNI_TRUE, &dummy);
+
 	JNI_deleteGlobalRef(ctxData->rowProducer);
 	if(ctxData->rowCollector != 0)
 		JNI_deleteGlobalRef(ctxData->rowCollector);
-	MemoryContextDelete(ctxData->rowContext);
 
 	if(ctxData->hasConnected && ctxData->spiContext != 0)
 	{
-		/* Connect during SRF_IS_FIRSTCALL(). Switch context back to what
-		 * it was at that time and disconnect.
+		/*
+		 * SPI was connected. We will (1) switch back to the memory context that
+		 * was imposed by SPI_connect, then (2) disconnect. SPI_finish will have
+		 * switched back to whatever memory context was current when SPI_connect
+		 * was called, and that context had better still be valid. It might be
+		 * the executor's multi_call_memory_ctx, if the SPI_connect happened
+		 * during initialization of the rowProducer or rowCollector, or the
+		 * executor's per-row context, if it happened later. Both of those are
+		 * still valid at this point. The final step (3) is to switch back to
+		 * the context we had before (1) and (2) happened.
 		 */
 		MemoryContext currCtx = MemoryContextSwitchTo(ctxData->spiContext);
 		Invocation_assertDisconnect();
@@ -113,18 +171,37 @@ static void _closeIteration(CallContextData* ctxData)
 	}
 }
 
+/*
+ * Called by PostgreSQL if abandoning the collection of set-returning-function
+ * results early.
+ */
 static void _endOfSetCB(Datum arg)
 {
-	Invocation topCall;
-	bool saveInExprCtxCB;
+	Invocation ctx;
 	CallContextData* ctxData = (CallContextData*)DatumGetPointer(arg);
-	if(currentInvocation == 0)
-		Invocation_pushInvocation(&topCall, ctxData->trusted);
 
-	saveInExprCtxCB = currentInvocation->inExprContextCB;
-	currentInvocation->inExprContextCB = true;
-	_closeIteration(ctxData);
-	currentInvocation->inExprContextCB = saveInExprCtxCB;
+	/*
+	 * Even if there is an invocation already on the stack, there is no
+	 * convincing reason to think this callback belongs to it; PostgreSQL
+	 * will make this callback when the expression context we did belong to
+	 * is being torn down. This is not a hot operation; it only happens in
+	 * rare cases when an SRF has been called and not completely consumed.
+	 * So just unconditionally set up a context for this call, and clean up
+	 * our own mess.
+	 */
+	PG_TRY();
+	{
+		Invocation_pushInvocation(&ctx);
+		currentInvocation->inExprContextCB = true;
+		_closeIteration(ctxData);
+		Invocation_popInvocation(false);
+	}
+	PG_CATCH();
+	{
+		Invocation_popInvocation(true);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
 }
 
 static Type _getCoerce(Type self, Type other, Oid fromOid, Oid toOid,
@@ -132,9 +209,7 @@ static Type _getCoerce(Type self, Type other, Oid fromOid, Oid toOid,
 
 Type Type_getCoerceIn(Type self, Type other)
 {
-	elog(DEBUG2, "Type_getCoerceIn(%s,%s)",
-			 format_type_be(self->typeId),
-			 format_type_be(other->typeId));
+	elog(DEBUG2, "Type_getCoerceIn(%d,%d)", self->typeId, other->typeId);
 	return _getCoerce(self, other, other->typeId, self->typeId,
 		&(self->inCoercions), Coerce_createIn);
 }
@@ -142,9 +217,7 @@ Type Type_getCoerceIn(Type self, Type other)
 
 Type Type_getCoerceOut(Type self, Type other)
 {
-	elog(DEBUG2, "Type_getCoerceOut(%s,%s)",
-			 format_type_be(self->typeId),
-			 format_type_be(other->typeId));
+	elog(DEBUG2, "Type_getCoerceOut(%d,%d)", self->typeId, other->typeId);
 	return _getCoerce(self, other, self->typeId, other->typeId,
 		&(self->outCoercions), Coerce_createOut);
 }
@@ -167,26 +240,26 @@ static Type _getCoerce(Type self, Type other, Oid fromOid, Oid toOid,
 	switch ( cpt )
 	{
 	case COERCION_PATH_NONE:
-		elog(ERROR, "no conversion function from %s to %s",
-			 format_type_be(fromOid),
-			 format_type_be(toOid));
+		elog(ERROR, "no conversion function from (regtype) %d to %d",
+			 fromOid, toOid);
+		pg_unreachable(); /*elog(ERROR is already so marked; what's with gcc?*/
 	case COERCION_PATH_RELABELTYPE:
 		/*
 		 * Binary compatible type. No need for a special coercer.
 		 * Unless ... it's a domain ....
 		 */
 		if ( ! IsBinaryCoercible(fromOid, toOid) && DomainHasConstraints(toOid))
-			elog(WARNING, "disregarding domain constraints of %s",
-				 format_type_be(toOid));
+			elog(WARNING, "disregarding domain constraints of (regtype) %d",
+				 toOid);
 		return self;
 	case COERCION_PATH_COERCEVIAIO:
-		elog(ERROR, "COERCEVIAIO not implemented from %s to %s",
-			 format_type_be(fromOid),
-			 format_type_be(toOid));
+		elog(ERROR, "COERCEVIAIO not implemented from (regtype) %d to %d",
+			 fromOid, toOid);
+		pg_unreachable();
 	case COERCION_PATH_ARRAYCOERCE:
-		elog(ERROR, "ARRAYCOERCE not implemented from %s to %s",
-			 format_type_be(fromOid),
-			 format_type_be(toOid));
+		elog(ERROR, "ARRAYCOERCE not implemented from (regtype) %d to %d",
+			 fromOid, toOid);
+		pg_unreachable();
 	case COERCION_PATH_FUNC:
 		break;
 	}
@@ -219,9 +292,57 @@ jvalue Type_coerceDatum(Type self, Datum value)
 	return self->typeClass->coerceDatum(self, value);
 }
 
+jvalue Type_coerceDatumAs(Type self, Datum value, jclass rqcls)
+{
+	jstring rqcname;
+	char *rqcname0;
+	Type rqtype;
+
+	if ( NULL == rqcls  ||  Type_getJavaClass(self) == rqcls )
+		return Type_coerceDatum(self, value);
+
+	rqcname = JNI_callObjectMethod(rqcls, Class_getCanonicalName);
+	rqcname0 = String_createNTS(rqcname);
+	JNI_deleteLocalRef(rqcname);
+	rqtype = Type_fromJavaType(self->typeId, rqcname0);
+	pfree(rqcname0);
+	if ( Type_canReplaceType(rqtype, self) )
+		return Type_coerceDatum(rqtype, value);
+	return Type_coerceDatum(self, value);
+}
+
 Datum Type_coerceObject(Type self, jobject object)
 {
 	return self->typeClass->coerceObject(self, object);
+}
+
+Datum Type_coerceObjectBridged(Type self, jobject object)
+{
+	jstring rqcname;
+	char *rqcname0;
+	Type rqtype;
+
+	if ( JNI_FALSE == JNI_isInstanceOf(object, s_TypeBridge_Holder_class) )
+		return Type_coerceObject(self, object);
+
+	rqcname = JNI_callObjectMethod(object, s_TypeBridge_Holder_className);
+	rqcname0 = String_createNTS(rqcname);
+	JNI_deleteLocalRef(rqcname);
+	rqtype = Type_fromJavaType(self->typeId, rqcname0);
+	pfree(rqcname0);
+	if ( ! Type_canReplaceType(rqtype, self) )
+	{
+		/*
+		 * Ignore the TypeBridge in this one oddball case that results from the
+		 * existence of two Types both mapping Java's byte[].
+		 */
+		if ( BYTEAOID == self->typeId  &&  CHARARRAYOID == rqtype->typeId )
+			rqtype = self;
+		else
+			elog(ERROR, "type bridge failure");
+	}
+	object = JNI_callObjectMethod(object, s_TypeBridge_Holder_payload);
+	return Type_coerceObject(rqtype, object);
 }
 
 char Type_getAlign(Type self)
@@ -287,11 +408,6 @@ const char* Type_getJNISignature(Type self)
 	return self->typeClass->getJNISignature(self);
 }
 
-const char* Type_getJNIReturnSignature(Type self, bool forMultiCall, bool useAltRepr)
-{
-	return self->typeClass->getJNIReturnSignature(self, forMultiCall, useAltRepr);
-}
-
 Type Type_getArrayType(Type self, Oid arrayTypeId)
 {
 	Type arrayType = self->arrayType;
@@ -336,14 +452,14 @@ TupleDesc Type_getTupleDesc(Type self, PG_FUNCTION_ARGS)
 	return self->typeClass->getTupleDesc(self, fcinfo);
 }
 
-Datum Type_invoke(Type self, jclass cls, jmethodID method, jvalue* args, PG_FUNCTION_ARGS)
+Datum Type_invoke(Type self, Function fn, PG_FUNCTION_ARGS)
 {
-	return self->typeClass->invoke(self, cls, method, args, fcinfo);
+	return self->typeClass->invoke(self, fn, fcinfo);
 }
 
-Datum Type_invokeSRF(Type self, jclass cls, jmethodID method, jvalue* args, PG_FUNCTION_ARGS)
+Datum Type_invokeSRF(Type self, Function fn, PG_FUNCTION_ARGS)
 {
-	bool hasRow;
+	jobject row;
 	CallContextData* ctxData;
 	FuncCallContext* context;
 	MemoryContext currCtx;
@@ -357,12 +473,23 @@ Datum Type_invokeSRF(Type self, jclass cls, jmethodID method, jvalue* args, PG_F
 		/* create a function context for cross-call persistence
 		 */
 		context = SRF_FIRSTCALL_INIT();
+
+		/*
+		 * Before creating the rowProducer (and rowCollector, if applicable),
+		 * switch to the SRF_FIRSTCALL_INIT-created multi_call_memory_ctx that
+		 * is not reset between calls. The motivation seems clear enough (allow
+		 * the first-call initialization to allocate things in a context that
+		 * will last through the sequence), though it is not clear whether
+		 * anything in existing PL/Java code in fact does so (other than our
+		 * allocation of ctxData below, which could perhaps just be a direct
+		 * MemoryContextAllocZero).
+		 */
 		currCtx = MemoryContextSwitchTo(context->multi_call_memory_ctx);
 
-		/* Call the declared Java function. It returns an instance that can produce
-		 * the rows.
+		/* Call the declared Java function. It returns an instance
+		 * that can produce the rows.
 		 */
-		tmp = Type_getSRFProducer(self, cls, method, args);
+		tmp = pljava_Function_refInvoke(fn);
 		if(tmp == 0)
 		{
 			Invocation_assertDisconnect();
@@ -371,10 +498,11 @@ Datum Type_invokeSRF(Type self, jclass cls, jmethodID method, jvalue* args, PG_F
 			SRF_RETURN_DONE(context);
 		}
 
-		ctxData = (CallContextData*)palloc(sizeof(CallContextData));
+		ctxData = (CallContextData*)palloc0(sizeof(CallContextData));
 		context->user_fctx = ctxData;
 
 		ctxData->elemType = self;
+		ctxData->fn = fn;
 		ctxData->rowProducer = JNI_newGlobalRef(tmp);
 		JNI_deleteLocalRef(tmp);
 
@@ -382,53 +510,57 @@ Datum Type_invokeSRF(Type self, jclass cls, jmethodID method, jvalue* args, PG_F
 		 * to produce the row. If one is needed, it's created here.
 		 */
 		tmp = Type_getSRFCollector(self, fcinfo);
-		if(tmp == 0)
-			ctxData->rowCollector = 0;
-		else
+		if(tmp != 0)
 		{
 			ctxData->rowCollector = JNI_newGlobalRef(tmp);
 			JNI_deleteLocalRef(tmp);
 		}		
 
-		ctxData->trusted       = currentInvocation->trusted;
-		ctxData->hasConnected  = currentInvocation->hasConnected;
-		ctxData->invocation    = currentInvocation->invocation;
-		if(ctxData->hasConnected)
-			ctxData->spiContext = CurrentMemoryContext;
-		else
-			ctxData->spiContext = 0;
-
-		ctxData->rowContext = AllocSetContextCreate(context->multi_call_memory_ctx,
-								  "PL/Java row context",
-								  ALLOCSET_DEFAULT_SIZES);
+		stashCallContext(ctxData);
 
 		/* Register callback to be called when the function ends
 		 */
-		RegisterExprContextCallback(((ReturnSetInfo*)fcinfo->resultinfo)->econtext, _endOfSetCB, PointerGetDatum(ctxData));
+		RegisterExprContextCallback(
+			((ReturnSetInfo*)fcinfo->resultinfo)->econtext,
+			_endOfSetCB, PointerGetDatum(ctxData));
+
+		/*
+		 * Switch back to the context on entry, which by caller arrangement is
+		 * one that gets reset between calls. Thus here at the conclusion of the
+		 * first-call initialization, the context invariant below is satisfied.
+		 */
 		MemoryContextSwitchTo(currCtx);
 	}
 
+	/*
+	 * Invariant: whether this is the first call and the SRF_IS_FIRSTCALL block
+	 * above just completed, or this is a subsequent call, at this point, the
+	 * memory context is the per-row one supplied by the executor (which gets
+	 * reset between calls).
+	 */
+
 	context = SRF_PERCALL_SETUP();
 	ctxData = (CallContextData*)context->user_fctx;
-	MemoryContextReset(ctxData->rowContext);
-	currCtx = MemoryContextSwitchTo(ctxData->rowContext);
+	currCtx = CurrentMemoryContext; /* save executor's per-row context */
 	currentInvocation->hasConnected = ctxData->hasConnected;
 	currentInvocation->invocation   = ctxData->invocation;
 
-	hasRow = Type_hasNextSRF(self, ctxData->rowProducer, ctxData->rowCollector, (jint)context->call_cntr);
-
-	ctxData->hasConnected = currentInvocation->hasConnected;
-	ctxData->invocation   = currentInvocation->invocation;
-	currentInvocation->hasConnected = false;
-	currentInvocation->invocation   = 0;
-
-	if(hasRow)
+	if(JNI_TRUE == pljava_Function_vpcInvoke(ctxData->fn,
+		ctxData->rowProducer, ctxData->rowCollector, (jlong)context->call_cntr,
+		JNI_FALSE, &row))
 	{
-		Datum result = Type_nextSRF(self, ctxData->rowProducer, ctxData->rowCollector);
+		Datum result = Type_datumFromSRF(self, row, ctxData->rowCollector);
+		JNI_deleteLocalRef(row);
+		stashCallContext(ctxData);
+		currentInvocation->hasConnected = false;
+		currentInvocation->invocation   = 0;
 		MemoryContextSwitchTo(currCtx);
 		SRF_RETURN_NEXT(context, result);
 	}
 
+	stashCallContext(ctxData);
+	currentInvocation->hasConnected = false;
+	currentInvocation->invocation   = 0;
 	MemoryContextSwitchTo(currCtx);
 
 	/* Unregister this callback and call it manually. We do this because
@@ -456,7 +588,23 @@ bool Type_isPrimitive(Type self)
 
 Type Type_fromJavaType(Oid typeId, const char* javaTypeName)
 {
-	CacheEntry ce = (CacheEntry)HashMap_getByString(s_obtainerByJavaName, javaTypeName);
+	/*
+	 * Do an initial lookup with InvalidOid as the oid part of the key. Multiple
+	 * entries for the same Java name and distinct oids are not anticipated
+	 * except for arrays.
+	 */
+	CacheEntry ce = (CacheEntry)HashMap_getByStringOid(
+		s_obtainerByJavaName, javaTypeName, InvalidOid);
+
+	/*
+	 * If no entry was found using InvalidOid and a valid typeId is provided
+	 * and the wanted Java type is an array, repeat the lookup using the typeId.
+	 */
+	if ( NULL == ce  &&  InvalidOid != typeId
+			&&  NULL != strchr(javaTypeName, ']') )
+		ce = (CacheEntry)HashMap_getByStringOid(
+			s_obtainerByJavaName, javaTypeName, typeId);
+
 	if(ce == 0)
 	{
 		size_t jtlen = strlen(javaTypeName) - 2;
@@ -490,6 +638,82 @@ Type Type_fromOidCache(Oid typeId)
 	return (Type)HashMap_getByOid(s_typeByOid, typeId);
 }
 
+/*
+ * Return NULL unless typeId represents a MappedUDT as found in the typeMap,
+ * in which case return a freshly-registered UDT Type.
+ *
+ * A MappedUDT's supporting functions don't have SQL declarations, from which
+ * an ordinary function's PLPrincipal and initiating class loader would be
+ * determined, so when obtaining the support function handles below, NULL will
+ * be passed as the language name, indicating that information isn't available,
+ * and won't be baked into the handles.
+ *
+ * A MappedUDT only has the two support functions readSQL and writeSQL.
+ * The I/O support functions parse and toString are only for a BaseUDT, so
+ * they do not need to be looked up here.
+ *
+ * The typeStruct argument supplies the type's name and namespace to
+ * UDT_registerUDT, as well as the by-value, length, and alignment common to
+ * any registered Type.
+ *
+ * A complication, though: in principle, this is a function on two variables,
+ * typeId and typeMap. (The typeStruct is functionally dependent on typeId.)
+ * But registration of the first one to be encountered will enter it in caches
+ * that depend only on the typeId (or Java class name, for the other direction)
+ * from that point on. This is longstanding PL/Java behavior, but XXX.
+ */
+static inline Type
+checkTypeMappedUDT(Oid typeId, jobject typeMap, Form_pg_type typeStruct)
+{
+	jobject joid;
+	jclass  typeClass;
+	Type    type;
+	jobject readMH;
+	jobject writeMH;
+	TupleDesc tupleDesc;
+	bool    hasTupleDesc;
+
+	if ( NULL == typeMap )
+		return NULL;
+
+	joid      = Oid_create(typeId);
+	typeClass = (jclass)JNI_callObjectMethod(typeMap, s_Map_get, joid);
+	JNI_deleteLocalRef(joid);
+
+	if ( NULL == typeClass )
+		return NULL;
+
+	if ( -2 == typeStruct->typlen )
+	{
+		JNI_deleteLocalRef(typeClass);
+		ereport(ERROR, (
+			errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			errmsg(
+				"type mapping in PL/Java for %s with NUL-terminated(-2) "
+				"storage not supported",
+				format_type_be_qualified(typeId))
+		));
+	}
+
+	readMH  = pljava_Function_udtReadHandle( typeClass, NULL, true);
+	writeMH = pljava_Function_udtWriteHandle(typeClass, NULL, true);
+
+	tupleDesc = lookup_rowtype_tupdesc_noerror(typeId, -1, true);
+	hasTupleDesc = NULL != tupleDesc;
+	if ( hasTupleDesc )
+		ReleaseTupleDesc(tupleDesc);
+
+	type = (Type)UDT_registerUDT(
+		typeClass, typeId, typeStruct, hasTupleDesc, false,
+		NULL, readMH, writeMH, NULL);
+	/*
+	 * UDT_registerUDT calls JNI_deleteLocalRef on readMH and writeMH.
+	 */
+
+	JNI_deleteLocalRef(typeClass);
+	return type;
+}
+
 Type Type_fromOid(Oid typeId, jobject typeMap)
 {
 	CacheEntry   ce;
@@ -497,7 +721,7 @@ Type Type_fromOid(Oid typeId, jobject typeMap)
 	Form_pg_type typeStruct;
 	Type         type = Type_fromOidCache(typeId);
 
-	if(type != 0)
+	if ( NULL != type )
 		return type;
 
 	typeTup    = PgObject_getValidTuple(TYPEOID, typeId, "type");
@@ -505,12 +729,14 @@ Type Type_fromOid(Oid typeId, jobject typeMap)
 
 	if(typeStruct->typelem != 0 && typeStruct->typlen == -1)
 	{
-		type = Type_getArrayType(Type_fromOid(typeStruct->typelem, typeMap), typeId);
+		type = Type_getArrayType(
+			Type_fromOid(typeStruct->typelem, typeMap), typeId);
 		goto finally;
 	}
 
 	/* For some reason, the anyarray is *not* an array with anyelement as the
 	 * element type. We'd like to see it that way though.
+	 * XXX would we, or does that mistake something intended in PostgreSQL?
 	 */
 	if(typeId == ANYARRAYOID)
 	{
@@ -527,40 +753,35 @@ Type Type_fromOid(Oid typeId, jobject typeMap)
 		goto finally;
 	}
 
-	if(typeMap != 0)
-	{
-		jobject joid      = Oid_create(typeId);
-		jclass  typeClass = (jclass)JNI_callObjectMethod(typeMap, s_Map_get, joid);
-
-		JNI_deleteLocalRef(joid);
-		if(typeClass != 0)
-		{
-			TupleDesc tupleDesc = lookup_rowtype_tupdesc_noerror(typeId, -1, true);
-			bool hasTupleDesc = NULL != tupleDesc;
-			if ( hasTupleDesc )
-				ReleaseTupleDesc(tupleDesc);
-			type = (Type)UDT_registerUDT(typeClass, typeId, typeStruct, hasTupleDesc, false);
-			JNI_deleteLocalRef(typeClass);
-			goto finally;
-		}
-	}
+	/*
+	 * Perhaps we have found a MappedUDT. If so, this check will register and
+	 * return it.
+	 */
+	type = checkTypeMappedUDT(typeId, typeMap, typeStruct);
+	if ( NULL != type )
+		goto finally;
 
 	/* Composite and record types will not have a TypeObtainer registered
 	 */
-	if(typeStruct->typtype == 'c' || (typeStruct->typtype == 'p' && typeId == RECORDOID))
+	if(typeStruct->typtype == 'c'
+		|| (typeStruct->typtype == 'p' && typeId == RECORDOID))
 	{
 		type = Composite_obtain(typeId);
 		goto finally;
 	}
 
 	ce = (CacheEntry)HashMap_getByOid(s_obtainerByOid, typeId);
-	if(ce == 0)
+	if ( NULL == ce )
 	{
-		type = Function_checkTypeUDT(typeId, typeStruct);
-		if ( 0 != type )
+		/*
+		 * Perhaps we have found a BaseUDT. If so, this check will register and
+		 * return it.
+		 */
+		type = Function_checkTypeBaseUDT(typeId, typeStruct);
+		if ( NULL != type )
 			goto finally;
 		/*
-		 * Default to String and standard textin/textout coersion.
+		 * Default to String and standard textin/textout coercion.
 		 * Note: if the AS spec includes a Java signature, and the corresponding
 		 * Java type is not String, that will trigger a call to
 		 * Type_fromJavaType to see if a mapping is registered that way. If not,
@@ -593,11 +814,11 @@ bool _Type_canReplaceType(Type self, Type other)
 	return self->typeClass == other->typeClass;
 }
 
-Datum _Type_invoke(Type self, jclass cls, jmethodID method, jvalue* args, PG_FUNCTION_ARGS)
+Datum _Type_invoke(Type self, Function fn, PG_FUNCTION_ARGS)
 {
 	MemoryContext currCtx;
 	Datum ret;
-	jobject value = JNI_callStaticObjectMethodA(cls, method, args);
+	jobject value = pljava_Function_refInvoke(fn);
 	if(value == 0)
 	{
 		fcinfo->isnull = true;
@@ -619,36 +840,14 @@ static Type _Type_createArrayType(Type self, Oid arrayTypeId)
 	return Array_fromOid(arrayTypeId, self);
 }
 
-static jobject _Type_getSRFProducer(Type self, jclass cls, jmethodID method, jvalue* args)
-{
-	return JNI_callStaticObjectMethodA(cls, method, args);
-}
-
 static jobject _Type_getSRFCollector(Type self, PG_FUNCTION_ARGS)
 {
 	return 0;
 }
 
-static bool _Type_hasNextSRF(Type self, jobject rowProducer, jobject rowCollector, jint callCounter)
+static Datum _Type_datumFromSRF(Type self, jobject row, jobject rowCollector)
 {
-	return (JNI_callBooleanMethod(rowProducer, s_Iterator_hasNext) == JNI_TRUE);
-}
-
-static Datum _Type_nextSRF(Type self, jobject rowProducer, jobject rowCollector)
-{
-	jobject tmp = JNI_callObjectMethod(rowProducer, s_Iterator_next);
-	Datum result = Type_coerceObject(self, tmp);
-	JNI_deleteLocalRef(tmp);
-	return result;
-}
-
-static void _Type_closeSRF(Type self, jobject rowProducer)
-{
-}
-
-jobject Type_getSRFProducer(Type self, jclass cls, jmethodID method, jvalue* args)
-{
-	return self->typeClass->getSRFProducer(self, cls, method, args);
+	return Type_coerceObject(self, row);
 }
 
 jobject Type_getSRFCollector(Type self, PG_FUNCTION_ARGS)
@@ -656,19 +855,9 @@ jobject Type_getSRFCollector(Type self, PG_FUNCTION_ARGS)
 	return self->typeClass->getSRFCollector(self, fcinfo);
 }
 
-bool Type_hasNextSRF(Type self, jobject rowProducer, jobject rowCollector, jint callCounter)
+Datum Type_datumFromSRF(Type self, jobject row, jobject rowCollector)
 {
-	return self->typeClass->hasNextSRF(self, rowProducer, rowCollector, callCounter);
-}
-
-Datum Type_nextSRF(Type self, jobject rowProducer, jobject rowCollector)
-{
-	return self->typeClass->nextSRF(self, rowProducer, rowCollector);
-}
-
-void Type_closeSRF(Type self, jobject rowProducer)
-{
-	self->typeClass->closeSRF(self, rowProducer);
+	return self->typeClass->datumFromSRF(self, row, rowCollector);
 }
 
 static Type _Type_getRealType(Type self, Oid realId, jobject typeMap)
@@ -681,17 +870,79 @@ static const char* _Type_getJNISignature(Type self)
 	return self->typeClass->JNISignature;
 }
 
-static const char* _Type_getJNIReturnSignature(Type self, bool forMultiCall, bool useAltRepr)
-{
-	return forMultiCall ? "Ljava/util/Iterator;" : Type_getJNISignature(self);
-}
-
 TupleDesc _Type_getTupleDesc(Type self, PG_FUNCTION_ARGS)
 {
 	ereport(ERROR,
 		(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 		 errmsg("Type is not associated with a record")));
 	return 0;	/* Keep compiler happy */
+}
+
+static void addTypeBridge(jclass c, jmethodID m, char const *cName, Oid oid)
+{
+	jstring jcn = String_createJavaStringFromNTS(cName);
+	JNI_callStaticObjectMethodLocked(c, m, jcn, oid);
+	JNI_deleteLocalRef(jcn);
+}
+
+static void initializeTypeBridges()
+{
+	jclass cls;
+	jmethodID ofClass;
+	jmethodID ofInterface;
+
+	cls = PgObject_getJavaClass("org/postgresql/pljava/jdbc/TypeBridge");
+	ofClass = PgObject_getStaticJavaMethod(cls, "ofClass",
+		"(Ljava/lang/String;I)Lorg/postgresql/pljava/jdbc/TypeBridge;");
+	ofInterface = PgObject_getStaticJavaMethod(cls, "ofInterface",
+		"(Ljava/lang/String;I)Lorg/postgresql/pljava/jdbc/TypeBridge;");
+
+	addTypeBridge(cls, ofClass, "java.time.LocalDate", DATEOID);
+	addTypeBridge(cls, ofClass, "java.time.LocalDateTime", TIMESTAMPOID);
+	addTypeBridge(cls, ofClass, "java.time.LocalTime", TIMEOID);
+	addTypeBridge(cls, ofClass, "java.time.OffsetDateTime", TIMESTAMPTZOID);
+	addTypeBridge(cls, ofClass, "java.time.OffsetTime", TIMETZOID);
+
+	/*
+	 * TypeBridges that allow Java primitive array types to be passed to things
+	 * expecting their boxed counterparts. An oddball case is byte[], given the
+	 * default oid BYTEAOID here instead of CHARARRAYOID following the pattern,
+	 * because there is a whole 'nother (see byte_array.c) Type that also maps
+	 * byte[] on the Java side, but bytea for PostgreSQL (I am not at all sure
+	 * what I think of that), and bridging it to a different Oid here would
+	 * break it as a parameter to prepared statements that were working. So
+	 * cater to that use, while possibly complicating the new use that was not
+	 * formerly possible.
+	 *
+	 * There is no bridge for char[], because PL/Java has no Type that maps it
+	 * to anything in PostgreSQL.
+	 */
+	addTypeBridge(cls, ofClass, "boolean[]", BOOLARRAYOID);
+	addTypeBridge(cls, ofClass,    "byte[]", BYTEAOID);
+	addTypeBridge(cls, ofClass,   "short[]", INT2ARRAYOID);
+	addTypeBridge(cls, ofClass,     "int[]", INT4ARRAYOID);
+	addTypeBridge(cls, ofClass,    "long[]", INT8ARRAYOID);
+	addTypeBridge(cls, ofClass,   "float[]", FLOAT4ARRAYOID);
+	addTypeBridge(cls, ofClass,  "double[]", FLOAT8ARRAYOID);
+
+	addTypeBridge(cls, ofInterface, "java.sql.SQLXML",
+#if defined(XMLOID)
+		XMLOID
+#else
+		TEXTOID
+#endif
+	);
+
+	JNI_deleteLocalRef(cls);
+
+	cls = PgObject_getJavaClass("org/postgresql/pljava/jdbc/TypeBridge$Holder");
+	s_TypeBridge_Holder_class = JNI_newGlobalRef(cls);
+	s_TypeBridge_Holder_className = PgObject_getJavaMethod(cls, "className",
+		"()Ljava/lang/String;");
+	s_TypeBridge_Holder_defaultOid = PgObject_getJavaMethod(cls, "defaultOid",
+		"()I");
+	s_TypeBridge_Holder_payload = PgObject_getJavaMethod(cls, "payload",
+		"()Ljava/lang/Object;");
 }
 
 /*
@@ -715,22 +966,15 @@ extern void Timestamp_initialize(void);
 
 extern void Oid_initialize(void);
 extern void AclId_initialize(void);
-extern void ErrorData_initialize(void);
-extern void LargeObject_initialize(void);
 
 extern void String_initialize(void);
 extern void byte_array_initialize(void);
 
-extern void JavaWrapper_initialize(void);
-extern void ExecutionPlan_initialize(void);
-extern void Portal_initialize(void);
-extern void Relation_initialize(void);
-extern void TriggerData_initialize(void);
-extern void Tuple_initialize(void);
-extern void TupleDesc_initialize(void);
 extern void TupleTable_initialize(void);
 
 extern void Composite_initialize(void);
+
+extern void pljava_SQLXMLImpl_initialize(void);
 
 extern void Type_initialize(void);
 void Type_initialize(void)
@@ -760,28 +1004,58 @@ void Type_initialize(void)
 
 	Oid_initialize();
 	AclId_initialize();
-	ErrorData_initialize();
-	LargeObject_initialize();
 
 	byte_array_initialize();
 
-	JavaWrapper_initialize();
-	ExecutionPlan_initialize();
-	Portal_initialize();
-	TriggerData_initialize();
-	Relation_initialize();
-	TupleDesc_initialize();
-	Tuple_initialize();
 	TupleTable_initialize();
 
 	Composite_initialize();
+	pljava_SQLXMLImpl_initialize();
 
 	s_Map_class = JNI_newGlobalRef(PgObject_getJavaClass("java/util/Map"));
-	s_Map_get = PgObject_getJavaMethod(s_Map_class, "get", "(Ljava/lang/Object;)Ljava/lang/Object;");
+	s_Map_get = PgObject_getJavaMethod(
+		s_Map_class, "get", "(Ljava/lang/Object;)Ljava/lang/Object;");
 
-	s_Iterator_class = JNI_newGlobalRef(PgObject_getJavaClass("java/util/Iterator"));
-	s_Iterator_hasNext = PgObject_getJavaMethod(s_Iterator_class, "hasNext", "()Z");
-	s_Iterator_next = PgObject_getJavaMethod(s_Iterator_class, "next", "()Ljava/lang/Object;");
+	s_Iterator_class = JNI_newGlobalRef(
+		PgObject_getJavaClass("java/util/Iterator"));
+	s_Iterator_hasNext = PgObject_getJavaMethod(
+		s_Iterator_class, "hasNext", "()Z");
+	s_Iterator_next = PgObject_getJavaMethod(
+		s_Iterator_class, "next", "()Ljava/lang/Object;");
+
+#if PG_VERSION_NUM < 110000
+	BOOLARRAYOID   = get_array_type(BOOLOID);
+	CHARARRAYOID   = get_array_type(CHAROID);
+	FLOAT8ARRAYOID = get_array_type(FLOAT8OID);
+	INT8ARRAYOID   = get_array_type(INT8OID);
+#endif
+
+	initializeTypeBridges();
+}
+
+static Type unimplementedTypeObtainer(Oid typeId);
+static jvalue unimplementedDatumCoercer(Type, Datum);
+static Datum unimplementedObjectCoercer(Type, jobject);
+
+static Type unimplementedTypeObtainer(Oid typeId)
+{
+	ereport(ERROR,
+		(errmsg("no type obtainer registered for type oid %ud", typeId)));
+	pg_unreachable();
+}
+
+static jvalue unimplementedDatumCoercer(Type t, Datum d)
+{
+	ereport(ERROR,
+		(errmsg("no datum coercer registered for type oid %ud", t->typeId)));
+	pg_unreachable();
+}
+
+static Datum unimplementedObjectCoercer(Type t, jobject o)
+{
+	ereport(ERROR,
+		(errmsg("no object coercer registered for type oid %ud", t->typeId)));
+	pg_unreachable();
 }
 
 /*
@@ -789,10 +1063,12 @@ void Type_initialize(void)
  */
 TypeClass TypeClass_alloc(const char* typeName)
 {
-	return TypeClass_alloc2(typeName, sizeof(struct TypeClass_), sizeof(struct Type_));
+	return TypeClass_alloc2(
+		typeName, sizeof(struct TypeClass_), sizeof(struct Type_));
 }
 
-TypeClass TypeClass_alloc2(const char* typeName, Size classSize, Size instanceSize)
+TypeClass TypeClass_alloc2(
+	const char* typeName, Size classSize, Size instanceSize)
 {
 	TypeClass self = (TypeClass)MemoryContextAlloc(TopMemoryContext, classSize);
 	PgObjectClass_init((PgObjectClass)self, typeName, instanceSize, 0);
@@ -800,18 +1076,14 @@ TypeClass TypeClass_alloc2(const char* typeName, Size classSize, Size instanceSi
 	self->javaTypeName    = "";
 	self->javaClass       = 0;
 	self->canReplaceType  = _Type_canReplaceType;
-	self->coerceDatum     = (DatumCoercer)_PgObject_pureVirtualCalled;
-	self->coerceObject    = (ObjectCoercer)_PgObject_pureVirtualCalled;
+	self->coerceDatum     = unimplementedDatumCoercer;
+	self->coerceObject    = unimplementedObjectCoercer;
 	self->createArrayType = _Type_createArrayType;
 	self->invoke          = _Type_invoke;
-	self->getSRFProducer  = _Type_getSRFProducer;
 	self->getSRFCollector = _Type_getSRFCollector;
-	self->hasNextSRF      = _Type_hasNextSRF;
-	self->nextSRF         = _Type_nextSRF;
-	self->closeSRF        = _Type_closeSRF;
+	self->datumFromSRF    = _Type_datumFromSRF;
 	self->getTupleDesc    = _Type_getTupleDesc;
 	self->getJNISignature = _Type_getJNISignature;
-	self->getJNIReturnSignature = _Type_getJNIReturnSignature;
 	self->dynamic         = false;
 	self->outParameter    = false;
 	self->getRealType     = _Type_getRealType;
@@ -831,7 +1103,8 @@ Type TypeClass_allocInstance(TypeClass cls, Oid typeId)
  */
 Type TypeClass_allocInstance2(TypeClass cls, Oid typeId, Form_pg_type pgType)
 {
-	Type t = (Type)PgObjectClass_allocInstance((PgObjectClass)(cls), TopMemoryContext);
+	Type t = (Type)
+		PgObjectClass_allocInstance((PgObjectClass)(cls), TopMemoryContext);
 	t->typeId       = typeId;
 	t->arrayType    = 0;
 	t->elementType  = 0;
@@ -863,15 +1136,29 @@ Type TypeClass_allocInstance2(TypeClass cls, Oid typeId, Form_pg_type pgType)
 /*
  * Register this type.
  */
-static void _registerType(Oid typeId, const char* javaTypeName, Type type, TypeObtainer obtainer)
+static void _registerType(
+	Oid typeId, const char* javaTypeName, Type type, TypeObtainer obtainer)
 {
-	CacheEntry ce = (CacheEntry)MemoryContextAlloc(TopMemoryContext, sizeof(CacheEntryData));
+	CacheEntry ce = (CacheEntry)
+		MemoryContextAlloc(TopMemoryContext, sizeof(CacheEntryData));
 	ce->typeId   = typeId;
 	ce->type     = type;
 	ce->obtainer = obtainer;
 
 	if(javaTypeName != 0)
-		HashMap_putByString(s_obtainerByJavaName, javaTypeName, ce);
+	{
+		/*
+		 * The s_obtainerByJavaName cache is now keyed by Java name and an oid,
+		 * rather than Java name alone, to address an issue affecting arrays.
+		 * To avoid changing other behavior, the oid used in the hash key will
+		 * be InvalidOid always, unless the Java name being registered is
+		 * an array type and the caller has passed a valid oid.
+		 */
+		Oid keyOid = (NULL == strchr(javaTypeName, ']'))
+			? InvalidOid
+			: typeId;
+		HashMap_putByStringOid(s_obtainerByJavaName, javaTypeName, keyOid, ce);
+	}
 
 	if(typeId != InvalidOid && HashMap_getByOid(s_obtainerByOid, typeId) == 0)
 		HashMap_putByOid(s_obtainerByOid, typeId, ce);
@@ -879,10 +1166,11 @@ static void _registerType(Oid typeId, const char* javaTypeName, Type type, TypeO
 
 void Type_registerType(const char* javaTypeName, Type type)
 {
-	_registerType(type->typeId, javaTypeName, type, (TypeObtainer)_PgObject_pureVirtualCalled);
+	_registerType(type->typeId, javaTypeName, type, unimplementedTypeObtainer);
 }
 
-void Type_registerType2(Oid typeId, const char* javaTypeName, TypeObtainer obtainer)
+void Type_registerType2(
+	Oid typeId, const char* javaTypeName, TypeObtainer obtainer)
 {
 	_registerType(typeId, javaTypeName, 0, obtainer);
 }

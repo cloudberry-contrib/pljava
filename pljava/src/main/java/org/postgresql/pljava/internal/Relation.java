@@ -1,10 +1,18 @@
 /*
- * Copyright (c) 2004, 2005, 2006 TADA AB - Taby Sweden
- * Distributed under the terms shown in the file COPYRIGHT
- * found in the root folder of this project or at
- * http://eng.tada.se/osprojects/COPYRIGHT.html
+ * Copyright (c) 2004-2019 Tada AB and other contributors, as listed below.
+ *
+ * All rights reserved. This program and the accompanying materials
+ * are made available under the terms of the The BSD 3-Clause License
+ * which accompanies this distribution, and is available at
+ * http://opensource.org/licenses/BSD-3-Clause
+ *
+ * Contributors:
+ *   Tada AB
+ *   Chapman Flack
  */
 package org.postgresql.pljava.internal;
+
+import static org.postgresql.pljava.internal.Backend.doInPG;
 
 import java.sql.SQLException;
 
@@ -14,13 +22,52 @@ import java.sql.SQLException;
  *
  * @author Thomas Hallgren
  */
-public class Relation extends JavaWrapper
+public class Relation
 {
 	private TupleDesc m_tupleDesc;
+	private final State m_state;
 
-	Relation(long pointer)
+	Relation(DualState.Key cookie, long resourceOwner, long pointer)
 	{
-		super(pointer);
+		m_state = new State(cookie, this, resourceOwner, pointer);
+	}
+
+	private static class State
+	extends DualState.SingleGuardedLong<Relation>
+	{
+		private State(
+			DualState.Key cookie, Relation r, long ro, long hth)
+		{
+			super(cookie, r, ro, hth);
+		}
+
+		/**
+		 * Return the Relation pointer.
+		 *<p>
+		 * This is a transitional implementation: ideally, each method requiring
+		 * the native state would be moved to this class, and hold the pin for
+		 * as long as the state is being manipulated. Simply returning the
+		 * guarded value out from under the pin, as here, is not great practice,
+		 * but as long as the value is only used in instance methods of
+		 * Relation, or subclasses, or something with a strong reference to
+		 * this Relation, and only on a thread for which
+		 * {@code Backend.threadMayEnterPG()} is true, disaster will not strike.
+		 * It can't go Java-unreachable while an instance method's on the call
+		 * stack, and the {@code Invocation} marking this state's native scope
+		 * can't be popped before return of any method using the value.
+		 */
+		private long getRelationPtr() throws SQLException
+		{
+			pin();
+			try
+			{
+				return guardedLong();
+			}
+			finally
+			{
+				unpin();
+			}
+		}
 	}
 
 	/**
@@ -30,10 +77,7 @@ public class Relation extends JavaWrapper
 	public String getName()
 	throws SQLException
 	{
-		synchronized(Backend.THREADLOCK)
-		{
-			return _getName(this.getNativePointer());
-		}
+		return doInPG(() -> _getName(m_state.getRelationPtr()));
 	}
 
 	/**
@@ -43,10 +87,7 @@ public class Relation extends JavaWrapper
 	public String getSchema()
 	throws SQLException
 	{
-		synchronized(Backend.THREADLOCK)
-		{
-			return _getSchema(this.getNativePointer());
-		}
+		return doInPG(() -> _getSchema(m_state.getRelationPtr()));
 	}
 
 	/**
@@ -58,18 +99,22 @@ public class Relation extends JavaWrapper
 	{
 		if(m_tupleDesc == null)
 		{
-			synchronized(Backend.THREADLOCK)
-			{
-				m_tupleDesc = _getTupleDesc(this.getNativePointer());
-			}
+			m_tupleDesc = doInPG(() -> _getTupleDesc(m_state.getRelationPtr()));
 		}
 		return m_tupleDesc;
 	}
 
 	/**
-	 * Creates a new <code>Tuple</code> by substituting new values for selected columns
-	 * copying the columns of the original <code>Tuple</code> at other positions. The
-	 * original <code>Tuple</code> is not modified.<br>
+	 * Creates a new {@code Tuple} by substituting new values for selected
+	 * columns copying the columns of the original {@code Tuple} at other
+	 * positions. The original {@code Tuple} is not modified.
+	 *<p>
+	 * Note: starting with PostgreSQL 10, this method can fail if SPI is not
+	 * connected; it is the <em>caller's</em> responsibility in PG 10 and up
+	 * to ensure that SPI is connected <em>and</em> that a longer-lived memory
+	 * context than SPI's has been selected, if the caller wants the result of
+	 * this call to survive {@code SPI_finish}.
+	 *
 	 * @param original The tuple that serves as the source.
 	 * @param fieldNumbers An array of one based indexes denoting the positions that
 	 * are to receive modified values.
@@ -81,13 +126,10 @@ public class Relation extends JavaWrapper
 	public Tuple modifyTuple(Tuple original, int[] fieldNumbers, Object[] values)
 	throws SQLException
 	{
-		synchronized(Backend.THREADLOCK)
-		{
-			return _modifyTuple(this.getNativePointer(), original.getNativePointer(), fieldNumbers, values);
-		}
+		return doInPG(() ->
+			_modifyTuple(m_state.getRelationPtr(),
+				original.getNativePointer(), fieldNumbers, values));
 	}
-
-	protected native void _free(long pointer);
 
 	private static native String _getName(long pointer)
 	throws SQLException;

@@ -9,7 +9,10 @@ and produce the files you need, but *not* install them into PostgreSQL.
 To do that, continue with the [installation instructions][inst].
 
 [mvn]: https://maven.apache.org/
-[java]: http://www.oracle.com/technetwork/java/javase/downloads/index.html
+[orjava]: http://www.oracle.com/technetwork/java/javase/downloads/index.html
+[OpenJDK]: https://adoptopenjdk.net/
+[hsj9]: https://www.eclipse.org/openj9/oj9_faq.html
+[GraalVM]: https://www.graalvm.org/downloads/
 
 **In case of build difficulties:**
 
@@ -25,13 +28,18 @@ There is a "troubleshooting the build" section at the end of this page.
 
     at the command line, which should tell you the version you have installed.
 
-0. The [Java Development Kit][java] (not just the Java Runtime Environment)
+0. The Java Development Kit (not just the Java Runtime Environment)
     version that you plan to use should be installed, also ideally in your
     search path so that
 
         javac  -version
 
-    just works.
+    just works. PL/Java can be built with [Oracle Java][orjava] or [OpenJDK][],
+    the latter with [either the Hotspot or the OpenJ9 JVM][hsj9], or with
+    [GraalVM][]. It is not necessary to use the same JDK to build PL/Java that
+    will later be used to run it in the database, and PL/Java applications can
+    generally take advantage of recent features in whatever Java version is
+    used at run time. (See more on [version compatibility](versions.html).)
 
 0. The PostgreSQL server version that you intend to use should be installed,
     and on your search path so that the command
@@ -52,7 +60,13 @@ There is a "troubleshooting the build" section at the end of this page.
 
         mvn --version
 
-    succeeds.
+    succeeds. It reports not only the version of Maven, but the version of Java
+    that Maven has found and is using, which must be a Java version supported
+    for building PL/Java (see more on [version compatibility](versions.html)).
+    If Maven is not finding and using the intended Java version, the environment
+    variable `JAVA_HOME` can be set to point to the desired Java installation,
+    and `mvn --version` should then confirm that the Java being found is the
+    one intended.
 
 If you have more than one version installed of PostgreSQL, Java, or the
 compile/link tools, make sure the ones found on your search path are the
@@ -68,13 +82,17 @@ Please review any of the following that apply to your situation:
 * Building on [Mac OS X](macosx.html)
 * Building on [Solaris](solaris.html)
 * Building on [Ubuntu](ubuntu.html)
+* Building on [Linux `ppc64le`](ppc64le-linux-gpp.html)
 * Building on Microsoft Windows: [with Visual Studio](buildmsvc.html)
     | [with MinGW-w64](mingw64.html)
 * Building on an EnterpriseDB PostgreSQL distribution that bundles system
     libraries, or other situations where
     [a linker runpath](runpath.html) can help
-* Building on a platform that
-    [requires PostgreSQL libraries at link time](linkpglibs.html)
+* Building if you are
+    [making a package for a software distribution](package.html)
+* Building [with debugging or optimization options](debugopt.html)
+
+[protofail]: versions.html#Maven_failures_when_downloading_dependencies
 
 ## Obtaining PL/Java sources
 
@@ -105,6 +123,12 @@ sources.
 From a clone, you can also build specific released versions, by first
 using `git checkout` with the tag that identifies the release.
 
+Building from unreleased, development sources will be of most interest when
+hacking on PL/Java itself. The GitHub "Branches" page can be used to see which
+branch has had the most recent development activity (this will not always be
+the branch named `master`; periods of development can be focused on the branch
+corresponding to current releases).
+
 [git]: https://git-scm.com/
 
 ## The build
@@ -129,6 +153,12 @@ A successful `mvn clean install` should produce output like this near the end:
 to [try out PL/Java in PostgreSQL][inst].
 
 [inst]: ../install/install.html
+
+### PostgreSQL version to build against
+
+If several versions of PostgreSQL are installed on the build host, select
+the one to be built for by adding the full path of its `pg_config` executable
+with `-Dpgsql.pgconfig=` on the `mvn` command line.
 
 ### I know PostgreSQL and PGXS. Explain Maven!
 
@@ -198,57 +228,12 @@ build issues that are commonly asked about.*
 
 [btwp]: https://github.com/tada/pljava/wiki/Build-tips
 
-#### Not all `[ERROR]`s are errors
-
-In the part of the build that compiles the native code, you may see lines of
-output starting with `[ERROR]`, but the build completes and shows success for
-all subprojects.
-
-Maven is capturing output from the C compiler and adding a tag at the front of
-each line. If the line from the C compiler contains the string `warning:` then
-Maven adds a `[WARNING]` tag at the front of the line; otherwise it adds
-`[ERROR]`. That is how Maven can turn a multiple-line warning, like
-
-```
-type/String.c: In function 'String_createJavaString':
-type/String.c:132:43: warning: conversion to 'jlong' from 'Size' may change
-                      the sign of the result [-Wsign-conversion]
-   bytebuf = JNI_newDirectByteBuffer(utf8, srcLen);
-                                           ^
-```
-
-(where only the second line contains `warning:`) into what looks like one
-`[WARNING]` and several `[ERROR]`s.
-
-If the compiler reports any actual errors, the build will fail.
-
-#### Disable nuisance warnings where possible
-
-The Maven plugin that drives the C compiler enables, by default, many
-types of warning that would be impractical to fix. Those can clutter the
-output (especially with Maven tagging them with `[ERROR]`) so that if the
-build does fail because of an actual error, it is difficult to read back
-through the `[ERROR]`s that were not errors, to find the one that was.
-
-If the compiler is `gcc`, an extra option `-Pwnosign` can be given on the
-`mvn` command line, and will suppress the most voluminous and least useful
-warnings. It adds the compiler option `-Wno-sign-conversion` which might not
-be understood by other compilers, so may not have the intended effect if the
-compiler is not `gcc`.
-
-#### Compile with a single core, for clarity of messages
-
-On a machine with many cores, messages from several compilation threads may be
-intermingled in the output so that related messages are hard to identify.
-The option `-Dnar.cores=1` will force the messages into a sequential order
-(and has little effect on the speed of a PL/Java build).
-
 #### Capture the output of `mvn -X`
 
 The `-X` option will add a lot of information on the details of Maven's
 build activities.
 
-    mvn  -X  -Pwnosign  -Dnar.cores=1  clean  install
+    mvn  -X  clean  install
 
 #### Avoid capturing the first run of Maven
 
@@ -256,3 +241,11 @@ On the first run, Maven will produce a lot of output while downloading all
 of the dependencies needed to complete the build. It is better, if the build
 fails, to simply run Maven again and capture the output of that run, which
 will not include all of the downloading activity.
+
+As an alternative, the flood of messages reflecting successful dependency
+downloads in a first run can be suppressed by adding this option on the `mvn`
+command line:
+
+```
+-Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.transfer.Slf4jMavenTransferListener=warn
+```

@@ -1,10 +1,14 @@
 /*
- * Copyright (c) 2004, 2005, 2006 TADA AB - Taby Sweden
- * Distributed under the terms shown in the file COPYRIGHT
- * found in the root folder of this project or at
- * http://eng.tada.se/osprojects/COPYRIGHT.html
+ * Copyright (c) 2004-2020 Tada AB and other contributors, as listed below.
  *
- * @author Thomas Hallgren
+ * All rights reserved. This program and the accompanying materials
+ * are made available under the terms of the The BSD 3-Clause License
+ * which accompanies this distribution, and is available at
+ * http://opensource.org/licenses/BSD-3-Clause
+ *
+ * Contributors:
+ *   Tada AB
+ *   Chapman Flack
  */
 #ifndef __pljava_type_Type_priv_h
 #define __pljava_type_Type_priv_h
@@ -89,24 +93,23 @@ struct TypeClass_
 	ObjectCoercer coerceObject;
 
 	/*
-	 * Calls a java method using one of the Call<type>MethodA routines where
-	 * <type> corresponds to the type represented by this instance and
-	 * coerces the returned value into a Datum.
+	 * Call a java method using (ultimately) one of the Call<type>Method
+	 * routines where <type> corresponds to the type represented by this
+	 * instance and coerce the returned value into a Datum.
 	 * 
 	 * The method will set the value pointed to by the wasNull parameter
 	 * to true if the Java method returned null. The method expects that
 	 * the wasNull parameter is set to false by the caller prior to the
 	 * call.
+	 *
+	 * The call into Java is made via a callback of
+	 * Function_<type>Invoke(fn, refArgs, primArgs).
 	 */
-	Datum (*invoke)(Type self, jclass clazz, jmethodID method, jvalue* args, PG_FUNCTION_ARGS);
+	Datum (*invoke)(Type self, Function fn, PG_FUNCTION_ARGS);
 
-	jobject (*getSRFProducer)(Type self, jclass clazz, jmethodID method, jvalue* args);
 	jobject (*getSRFCollector)(Type self, PG_FUNCTION_ARGS);
-	bool (*hasNextSRF)(Type self, jobject producer, jobject collector, jint counter);
-	Datum (*nextSRF)(Type self, jobject producer, jobject collector);
-	void (*closeSRF)(Type self, jobject producer);
+	Datum (*datumFromSRF)(Type self, jobject row, jobject collector);
 	const char* (*getJNISignature)(Type self);
-	const char* (*getJNIReturnSignature)(Type self, bool forMultiCall, bool useAltRepr);
 
 	/*
 	 * Returns the TupleDesc that corresponds to this type.
@@ -168,7 +171,7 @@ extern bool _Type_canReplaceType(Type self, Type other);
  * Default version of invoke. Will make a JNI CallObjectMethod call and then
  * a call to self->coerceObject to create the Datum.
  */
-extern Datum _Type_invoke(Type self, jclass cls, jmethodID method, jvalue* args, PG_FUNCTION_ARGS);
+extern Datum _Type_invoke(Type self, Function fn, PG_FUNCTION_ARGS);
 
 /*
  * Return the m_oid member of the Type. This is the default version of

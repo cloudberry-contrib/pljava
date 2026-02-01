@@ -1,19 +1,20 @@
 /*
- * Copyright (c) 2004, 2005, 2006 TADA AB - Taby Sweden
- * Distributed under the terms shown in the file COPYRIGHT
- * found in the root folder of this project or at
- * http://eng.tada.se/osprojects/COPYRIGHT.html
+ * Copyright (c) 2004-2023 Tada AB and other contributors, as listed below.
  *
- * @author Thomas Hallgren
+ * All rights reserved. This program and the accompanying materials
+ * are made available under the terms of the The BSD 3-Clause License
+ * which accompanies this distribution, and is available at
+ * http://opensource.org/licenses/BSD-3-Clause
+ *
+ * Contributors:
+ *   Tada AB
+ *   Chapman Flack
  */
 #include <postgres.h>
 #include <miscadmin.h>
 #include "org_postgresql_pljava_internal_Session.h"
 #include "pljava/Session.h"
 #include "pljava/type/AclId.h"
-
-#define pg_unreachable() abort()
-
 
 extern void Session_initialize(void);
 void Session_initialize(void)
@@ -44,9 +45,21 @@ Java_org_postgresql_pljava_internal_Session__1setUser(
 	/* No error checking since this might be a restore of user in
 	 * a finally block after an exception.
 	 */
+	bool wasLocalChange = false;
+	int secContext;
+	Oid dummy;
 	BEGIN_NATIVE_NO_ERRCHECK
-	SetUserIdAndContext(AclId_getAclId(aclId), true);
+	if (InSecurityRestrictedOperation())
+		ereport(ERROR,	(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE), errmsg(
+			"cannot set parameter \"%s\" within security-restricted operation",
+			"role")));
+	GetUserIdAndSecContext(&dummy, &secContext);
+	wasLocalChange = 0 != ( secContext & SECURITY_LOCAL_USERID_CHANGE );
+	if ( isLocalChange )
+		secContext |= SECURITY_LOCAL_USERID_CHANGE;
+	else
+		secContext &= ~SECURITY_LOCAL_USERID_CHANGE;
+	SetUserIdAndSecContext(AclId_getAclId(aclId), secContext);
 	END_NATIVE
-	return JNI_TRUE;
+	return wasLocalChange ? JNI_TRUE : JNI_FALSE;
 }
-

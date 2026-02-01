@@ -1,10 +1,14 @@
 /*
- * Copyright (c) 2004, 2005, 2006 TADA AB - Taby Sweden
- * Distributed under the terms shown in the file COPYRIGHT
- * found in the root folder of this project or at
- * http://eng.tada.se/osprojects/COPYRIGHT.html
+ * Copyright (c) 2004-2025 Tada AB and other contributors, as listed below.
  *
- * @author Thomas Hallgren
+ * All rights reserved. This program and the accompanying materials
+ * are made available under the terms of the The BSD 3-Clause License
+ * which accompanies this distribution, and is available at
+ * http://opensource.org/licenses/BSD-3-Clause
+ *
+ * Contributors:
+ *   Tada AB
+ *   Chapman Flack
  */
 #ifndef __pljava_pljava_h
 #define __pljava_pljava_h
@@ -33,6 +37,7 @@ extern int vsnprintf(char* buf, size_t count, const char* format, va_list arg);
 #include <utils/syscache.h>
 #include <utils/memutils.h>
 #include <tcop/tcopprot.h>
+#include <access/htup_details.h>
 
 /*
 * for now we have to support older compilers that don't have 
@@ -71,23 +76,13 @@ extern int vsnprintf(char* buf, size_t count, const char* format, va_list arg);
 #endif
 
 /*
- * GETSTRUCT require "access/htup_details.h" to be included in PG9.3
+ * This symbol was spelled without the underscores prior to PG 14.
  */
-#if PG_VERSION_NUM >= 90300
-#include "access/htup_details.h"
+#if PG_VERSION_NUM < 140000
+#define PG_NODE_TREEOID PGNODETREEOID
 #endif
 
-
-/* The errorOccured will be set when a call from Java into one of the
- * backend functions results in a elog that causes a longjmp (Levels >= ERROR)
- * that was trapped using the PLJAVA_TRY/PLJAVA_CATCH macros.
- * When this happens, all further calls from Java must be blocked since the
- * state of the current transaction is unknown. Further more, once the function
- * that initially called Java finally returns, the intended longjmp (the one
- * to the original value of Warn_restart) must be made.
- */
-extern jlong mainThreadId;
-extern bool pljavaEntryFence(JNIEnv* env);
+extern void* mainThreadId;
 extern JNIEnv* currentJNIEnv;
 extern MemoryContext JavaMemoryContext;
 
@@ -116,31 +111,13 @@ extern MemoryContext JavaMemoryContext;
  * stack_base_ptr was static before PG 8.1. By executive decision, PL/Java now
  * has 8.1 as a back compatibility limit; no empty #defines here for earlier.
  */
-#if 90104<=PG_VERSION_NUM || \
-	90008<=PG_VERSION_NUM && PG_VERSION_NUM<90100 || \
-	80412<=PG_VERSION_NUM && PG_VERSION_NUM<90000 || \
-	80319<=PG_VERSION_NUM && PG_VERSION_NUM<80400
 #define NEED_MISCADMIN_FOR_STACK_BASE
 #define _STACK_BASE_TYPE pg_stack_base_t
 #define _STACK_BASE_SET saveStackBasePtr = set_stack_base()
 #define _STACK_BASE_RESTORE restore_stack_base(saveStackBasePtr)
-#else
-extern
-#if PG_VERSION_NUM < 80200
-DLLIMPORT
-#else
-PGDLLIMPORT
-#endif
-char* stack_base_ptr;
-#define _STACK_BASE_TYPE char*
-#define _STACK_BASE_SET \
-	saveStackBasePtr = stack_base_ptr; \
-	stack_base_ptr = (char*)&saveMainThreadId
-#define _STACK_BASE_RESTORE stack_base_ptr = saveStackBasePtr
-#endif
 
 #define STACK_BASE_VARS \
-	jlong saveMainThreadId = 0; \
+	void* saveMainThreadId = 0; \
 	_STACK_BASE_TYPE saveStackBasePtr;
 
 #define STACK_BASE_PUSH(threadId) \
@@ -178,24 +155,20 @@ char* stack_base_ptr;
  * 
  * Class 07 - Dynamic SQL Exception
  */
-#define ERRCODE_INVALID_DESCRIPTOR_INDEX		MAKE_SQLSTATE('0','7', '0','0','9')
-
+#define ERRCODE_INVALID_DESCRIPTOR_INDEX MAKE_SQLSTATE('0','7', '0','0','9')
 /*
- * Union used when coercing void* to jlong and vice versa
+ * Class 46 - SQL/JRT
  */
-typedef union
+#define ERRCODE_CLASS_SQLJRT MAKE_SQLSTATE('4','6','0','0','0')
+
+static inline jlong
+PointerGetJLong(const void *X)
 {
-	void*  ptrVal;
-	jlong  longVal; /* 64 bit quantity */
-	struct
-	{
-		/* Used when calculating pointer hash in systems where
-		 * a pointer is 64 bit
-		 */
-		uint32 intVal_1;
-		uint32 intVal_2;
-	} x64;
-} Ptr2Long;
+	return (jlong)(uintptr_t)(X);
+}
+
+#define JLongGet(T, X) \
+	(AssertVariableIsOfTypeMacro(X, jlong), (T)(uintptr_t)(X))
 
 struct Invocation_;
 typedef struct Invocation_ Invocation;

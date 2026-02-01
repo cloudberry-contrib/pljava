@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2019 Tada AB and other contributors, as listed below.
+ * Copyright (c) 2015-2024 Tada AB and other contributors, as listed below.
  *
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the The BSD 3-Clause License
@@ -10,37 +10,30 @@
  *   Chapman Flack
  */
 #include <postgres.h>
-#if PG_VERSION_NUM >= 90300
 #include <access/htup_details.h>
-#else
-#include <access/htup.h>
-#endif
 #include <access/xact.h>
 #include <catalog/pg_language.h>
 #include <catalog/pg_proc.h>
-#include <catalog/pg_namespace.h>
-#if PG_VERSION_NUM >= 90100
+#include <commands/dbcommands.h>
 #include <commands/extension.h>
-#endif
 #include <commands/portalcmds.h>
 #include <executor/spi.h>
 #include <miscadmin.h>
 #include <libpq/libpq-be.h>
+#include <postmaster/autovacuum.h>
 #include <tcop/pquery.h>
 #include <utils/builtins.h>
 #include <utils/lsyscache.h>
 #include <utils/memutils.h>
+#include <utils/snapmgr.h>
 #include <utils/syscache.h>
 
 #if PG_VERSION_NUM >= 120000
 #include <catalog/pg_namespace.h>
 #define GetNamespaceOid(k1) \
 	GetSysCacheOid1(NAMESPACENAME, Anum_pg_namespace_oid, k1)
-#elif PG_VERSION_NUM >= 90000
-#define GetNamespaceOid(k1) GetSysCacheOid1(NAMESPACENAME, k1)
 #else
-#define SearchSysCache1(cid, k1) SearchSysCache(cid, k1, 0, 0, 0)
-#define GetNamespaceOid(k1) GetSysCacheOid(NAMESPACENAME, k1, 0, 0, 0)
+#define GetNamespaceOid(k1) GetSysCacheOid1(NAMESPACENAME, k1)
 #endif
 
 #include "pljava/InstallHelper.h"
@@ -51,34 +44,21 @@
 #include "pljava/PgObject.h"
 #include "pljava/type/String.h"
 
-#define pg_unreachable() abort()
-
+#if PG_VERSION_NUM < 170000
+#define AmAutoVacuumWorkerProcess() IsAutoVacuumWorkerProcess()
+#define AmBackgroundWorkerProcess() IsBackgroundWorker
 /*
- * CppAsString2 first appears in PG8.4.  Once the compatibility target reaches
- * 8.4, this fallback will not be needed.
+ * As of 9.6.1, IsBackgroundWorker still does not
+ * have PGDLLIMPORT, but MyBgworkerEntry != NULL can be used in MSVC instead.
+ *
+ * One thing it's needed for is to avoid dereferencing MyProcPort in a
+ * background worker, where it's not set.
  */
-#ifndef CppAsString2
-#define CppAsString2(x) CppAsString(x)
+#if defined(_MSC_VER)
+#include <postmaster/bgworker.h>
+#define IsBackgroundWorker (MyBgworkerEntry != NULL)
 #endif
-
-/*
- * Before 9.1, there was no creating_extension. Before 9.5, it did not have
- * PGDLLIMPORT and so was not visible in Windows. In either case, just define
- * it to be false, but also define CREATING_EXTENSION_HACK if on Windows and
- * it needs to be tested for in some roundabout way.
- */
-#if PG_VERSION_NUM < 90100 || defined(_MSC_VER) && PG_VERSION_NUM < 90500
-#define creating_extension false
-#if PG_VERSION_NUM >= 90100
-#define CREATING_EXTENSION_HACK
-#endif
-#endif
-
-#ifndef PLJAVA_SO_VERSION
-#error "PLJAVA_SO_VERSION needs to be defined to compile this file."
-#else
-#define SO_VERSION_STRING CppAsString2(PLJAVA_SO_VERSION)
-#endif
+#endif /* PG_VERSION_NUM < 170000 */
 
 /*
  * The name of the table the extension scripts will create to pass information
@@ -91,11 +71,13 @@
 static jclass s_InstallHelper_class;
 static jmethodID s_InstallHelper_hello;
 static jmethodID s_InstallHelper_groundwork;
+static jfieldID  s_InstallHelper_MANAGE_CONTEXT_LOADER;
 
 static bool extensionExNihilo = false;
 
-static void checkLoadPath( bool *livecheck);
-static void getExtensionLoadPath();
+static void checkLoadPath(void);
+static void getExtensionLoadPath(void);
+static char *origUserName();
 
 char const *pljavaLoadPath = NULL;
 
@@ -112,28 +94,55 @@ bool pljavaViableXact()
 
 char *pljavaDbName()
 {
+	if ( AmAutoVacuumWorkerProcess() || AmBackgroundWorkerProcess() )
+	{
+		char *shortlived;
+		static char *longlived;
+		if ( NULL == longlived )
+		{
+			shortlived = get_database_name(MyDatabaseId);
+			if ( NULL != shortlived )
+			{
+				longlived = MemoryContextStrdup(TopMemoryContext, shortlived);
+				pfree(shortlived);
+			}
+		}
+		return longlived;
+	}
 	return MyProcPort->database_name;
+}
+
+static char *origUserName()
+{
+	if ( AmAutoVacuumWorkerProcess() || AmBackgroundWorkerProcess() )
+	{
+		char *shortlived;
+		static char *longlived;
+		if ( NULL == longlived )
+		{
+			shortlived = GetUserNameFromId(GetAuthenticatedUserId(), false);
+			longlived = MemoryContextStrdup(TopMemoryContext, shortlived);
+			pfree(shortlived);
+		}
+		return longlived;
+	}
+	return MyProcPort->user_name;
 }
 
 char const *pljavaClusterName()
 {
 	/*
-	 * If PostgreSQL isn't at least 9.5, there can't BE a cluster name, and if
-	 * it is, then there's always one (even if it is an empty string), so
-	 * PG_GETCONFIGOPTION is safe.
+	 * In PostgreSQL of at least 9.5, there's always one (even if it is an empty
+	 * string), so PG_GETCONFIGOPTION is safe.
 	 */
-#if PG_VERSION_NUM < 90500
-	return "";
-#else
 	return PG_GETCONFIGOPTION("cluster_name");
-#endif
 }
 
 void pljavaCheckExtension( bool *livecheck)
 {
 	if ( ! creating_extension )
 	{
-		checkLoadPath( livecheck);
+		checkLoadPath();
 		return;
 	}
 	if ( NULL != livecheck )
@@ -156,19 +165,17 @@ void pljavaCheckExtension( bool *livecheck)
  * on Windows. So if livecheck isn't null, this function only needs to proceed
  * as far as the CREATING_EXTENSION_HACK and then return.
  */
-static void checkLoadPath( bool *livecheck)
+static void checkLoadPath()
 {
 	List *l;
 	Node *ut;
 	LoadStmt *ls;
+	PlannedStmt *ps;
 
-#ifndef CREATING_EXTENSION_HACK
-	if ( NULL != livecheck )
-		return;
-#endif
 	if ( NULL == ActivePortal )
 		return;
 	l = ActivePortal->stmts;
+
 	if ( NULL == l )
 		return;
 	if ( 1 < list_length( l) )
@@ -179,23 +186,26 @@ static void checkLoadPath( bool *livecheck)
 		elog(DEBUG2, "got null for first statement from ActivePortal");
 		return;
 	}
-	if ( T_LoadStmt != nodeTag(ut) )
-#ifdef CREATING_EXTENSION_HACK
-		if ( T_CreateExtensionStmt == nodeTag(ut) )
+
+	if ( T_PlannedStmt == nodeTag(ut) )
+	{
+		ps = (PlannedStmt *)ut;
+		if ( CMD_UTILITY != ps->commandType )
 		{
-			if ( NULL != livecheck )
-			{
-				*livecheck = true;
-				return;
-			}
-			getExtensionLoadPath();
-			if ( NULL != pljavaLoadPath )
-				pljavaLoadingAsExtension = true;
+			elog(DEBUG2, "ActivePortal has PlannedStmt command type %u",
+				 ps->commandType);
+			return;
 		}
-#endif
+		ut = ps->utilityStmt;
+		if ( NULL == ut )
+		{
+			elog(DEBUG2, "got null for utilityStmt from PlannedStmt");
+			return;
+		}
+	}
+	if ( T_LoadStmt != nodeTag(ut) )
 		return;
-	if ( NULL != livecheck )
-		return;
+
 	ls = (LoadStmt *)ut;
 	if ( NULL == ls->filename )
 	{
@@ -252,7 +262,7 @@ static void getExtensionLoadPath()
  *
  * If a string is returned, it has been palloc'd in the current context.
  */
-char *pljavaFnOidToLibPath(Oid fnOid)
+char *pljavaFnOidToLibPath(Oid fnOid, char **langName, bool *trusted)
 {
 	bool isnull;
 	HeapTuple procTup;
@@ -292,13 +302,15 @@ char *pljavaFnOidToLibPath(Oid fnOid)
 		elog(ERROR, "cache lookup failed for language %u", langId);
 	langStruct = (Form_pg_language) GETSTRUCT(langTup);
 	handlerOid = langStruct->lanplcallfoid;
-	ReleaseSysCache(langTup);
 	/*
 	 * PL/Java has certainly got a function call handler, so if this language
 	 * hasn't, PL/Java it's not.
 	 */
 	if ( InvalidOid == handlerOid )
+	{
+		ReleaseSysCache(langTup);
 		return NULL;
+	}
 
 	/*
 	 * Da capo al coda ... handlerOid is another function to be looked up.
@@ -311,7 +323,10 @@ char *pljavaFnOidToLibPath(Oid fnOid)
 	 * If the call handler's not a C function, this isn't PL/Java....
 	 */
 	if ( ClanguageId != procStruct->prolang )
+	{
+		ReleaseSysCache(langTup);
 		return NULL;
+	}
 
 	/*
 	 * Now that the handler is known to be a C function, it should have a
@@ -321,6 +336,11 @@ char *pljavaFnOidToLibPath(Oid fnOid)
 		SysCacheGetAttr(PROCOID, procTup, Anum_pg_proc_probin, &isnull);
 	if ( isnull )
 		elog(ERROR, "null probin for C function %u", handlerOid);
+	if ( NULL != langName )
+		*langName = pstrdup(NameStr(langStruct->lanname));
+	if ( NULL != trusted )
+		*trusted = langStruct->lanpltrusted;
+	ReleaseSysCache(langTup);
 	probinstring = /* TextDatumGetCString(probinattr); */
 		DatumGetCString(DirectFunctionCall1(textout, probinattr)); /*archaic*/
 	ReleaseSysCache(procTup);
@@ -336,13 +356,25 @@ char *pljavaFnOidToLibPath(Oid fnOid)
 	return probinstring;
 }
 
-bool InstallHelper_isPLJavaFunction(Oid fn)
+bool InstallHelper_shouldDeferInit()
+{
+	if ( AmAutoVacuumWorkerProcess() || AmBackgroundWorkerProcess() )
+			return true;
+
+	if ( ! IsBinaryUpgrade )
+		return false;
+
+	Backend_warnJEP411(true);
+	return true;
+}
+
+bool InstallHelper_isPLJavaFunction(Oid fn, char **langName, bool *trusted)
 {
 	char *itsPath;
 	char *pljPath;
 	bool result = false;
 
-	itsPath = pljavaFnOidToLibPath(fn);
+	itsPath = pljavaFnOidToLibPath(fn, langName, trusted);
 	if ( NULL == itsPath )
 		return false;
 
@@ -350,9 +382,9 @@ bool InstallHelper_isPLJavaFunction(Oid fn)
 	{
 		pljPath = NULL;
 		if ( InvalidOid != pljavaTrustedOid )
-			pljPath = pljavaFnOidToLibPath(pljavaTrustedOid);
+			pljPath = pljavaFnOidToLibPath(pljavaTrustedOid, NULL, NULL);
 		if ( NULL == pljPath && InvalidOid != pljavaUntrustedOid )
-			pljPath = pljavaFnOidToLibPath(pljavaUntrustedOid);
+			pljPath = pljavaFnOidToLibPath(pljavaUntrustedOid, NULL, NULL);
 		if ( NULL == pljPath )
 		{
 			elog(WARNING, "unable to determine PL/Java's load path");
@@ -368,28 +400,44 @@ finally:
 	return result;
 }
 
-char const *InstallHelper_defaultClassPath(char *pathbuf)
+char const *InstallHelper_defaultModulePath(char *pathbuf, char pathsep)
 {
 	char * const pbend = pathbuf + MAXPGPATH;
 	char *pbp = pathbuf;
 	size_t remaining;
-	size_t verlen = strlen(SO_VERSION_STRING);
+	int would_have_sprinted;
 
 	get_share_path(my_exec_path, pathbuf);
 	join_path_components(pathbuf, pathbuf, "pljava");
-	join_path_components(pathbuf, pathbuf, "pljava-");
+	join_path_components(pathbuf, pathbuf, "pljava"); /* puts \0 where - goes */
 
 	for ( ; pbp < pbend && '\0' != *pbp ; ++ pbp )
 		;
 	if ( pbend == pbp )
 		return NULL;
 
-	remaining = pbend - pbp;
-	if ( remaining < verlen + 5 )
+	/*
+	 * pbp now points to a \0 that should later be replaced with a hyphen.
+	 * The \0-terminated string starting at pathbuf can, for now, be reused
+	 * as an argument to snprintf.
+	 */
+
+	remaining = (pbend - pbp) - 1;
+
+	would_have_sprinted = snprintf(pbp + 1, remaining, "%s.jar%c%s-api-%s.jar",
+		SO_VERSION_STRING, pathsep, pathbuf, SO_VERSION_STRING);
+
+	if ( would_have_sprinted >= remaining )
 		return NULL;
 
-	snprintf(pbp, remaining, "%s.jar", SO_VERSION_STRING);
+	*pbp = '-'; /* overwrite the \0 so now it's a single string. */
 	return pathbuf;
+}
+
+void InstallHelper_earlyHello()
+{
+	elog(DEBUG2,
+		"pljava-so-" SO_VERSION_STRING " built for (" PG_VERSION_STR ")");
 }
 
 char *InstallHelper_hello()
@@ -397,6 +445,15 @@ char *InstallHelper_hello()
 	char pathbuf[MAXPGPATH];
 	Invocation ctx;
 	jstring nativeVer;
+	jstring serverBuiltVer;
+	jstring serverRunningVer;
+#if PG_VERSION_NUM >= 120000
+	FunctionCallInfoBaseData
+#else
+	FunctionCallInfoData
+#endif
+		fcinfo;
+	text *runningVer;
 	jstring user;
 	jstring dbname;
 	jstring clustername;
@@ -407,11 +464,24 @@ char *InstallHelper_hello()
 	jstring greeting;
 	char *greetingC;
 	char const *clusternameC = pljavaClusterName();
+	jboolean manageContext = JNI_getStaticBooleanField(s_InstallHelper_class,
+		s_InstallHelper_MANAGE_CONTEXT_LOADER);
+
+	pljava_JNI_threadInitialize(JNI_TRUE == manageContext);
 
 	Invocation_pushBootContext(&ctx);
 	nativeVer = String_createJavaStringFromNTS(SO_VERSION_STRING);
-	user = String_createJavaStringFromNTS(MyProcPort->user_name);
-	dbname = String_createJavaStringFromNTS(MyProcPort->database_name);
+	serverBuiltVer = String_createJavaStringFromNTS(PG_VERSION_STR);
+
+	InitFunctionCallInfoData(fcinfo, NULL, 0,
+	InvalidOid, /* collation */
+	NULL, NULL);
+	runningVer = DatumGetTextP(pgsql_version(&fcinfo));
+	serverRunningVer = String_createJavaString(runningVer);
+	pfree(runningVer);
+
+	user = String_createJavaStringFromNTS(origUserName());
+	dbname = String_createJavaStringFromNTS(pljavaDbName());
 	if ( '\0' == *clusternameC )
 		clustername = NULL;
 	else
@@ -430,9 +500,13 @@ char *InstallHelper_hello()
 
 	greeting = JNI_callStaticObjectMethod(
 		s_InstallHelper_class, s_InstallHelper_hello,
-		nativeVer, user, dbname, clustername, ddir, ldir, sdir, edir);
+		nativeVer, serverBuiltVer, serverRunningVer,
+		user, dbname, clustername,
+		ddir, ldir, sdir, edir);
 
 	JNI_deleteLocalRef(nativeVer);
+	JNI_deleteLocalRef(serverBuiltVer);
+	JNI_deleteLocalRef(serverRunningVer);
 	JNI_deleteLocalRef(user);
 	JNI_deleteLocalRef(dbname);
 	if ( NULL != clustername )
@@ -450,8 +524,14 @@ char *InstallHelper_hello()
 void InstallHelper_groundwork()
 {
 	Invocation ctx;
-	Invocation_pushInvocation(&ctx, false);
+	bool snapshot_set = false;
+	Invocation_pushInvocation(&ctx);
 	ctx.function = Function_INIT_WRITER;
+	if ( ! ActiveSnapshotSet() )
+	{
+		PushActiveSnapshot(GetTransactionSnapshot());
+		snapshot_set = true;
+	}
 	PG_TRY();
 	{
 		char const *lpt = LOADPATH_TBL_NAME;
@@ -469,10 +549,18 @@ void InstallHelper_groundwork()
 		JNI_deleteLocalRef(pljlp);
 		JNI_deleteLocalRef(jlpt);
 		JNI_deleteLocalRef(jlptq);
+		if ( snapshot_set )
+		{
+			PopActiveSnapshot();
+		}
 		Invocation_popInvocation(false);
 	}
 	PG_CATCH();
 	{
+		if ( snapshot_set )
+		{
+			PopActiveSnapshot();
+		}
 		Invocation_popInvocation(true);
 		PG_RE_THROW();
 	}
@@ -483,11 +571,14 @@ void InstallHelper_initialize()
 {
 	s_InstallHelper_class = (jclass)JNI_newGlobalRef(PgObject_getJavaClass(
 		"org/postgresql/pljava/internal/InstallHelper"));
+	s_InstallHelper_MANAGE_CONTEXT_LOADER = PgObject_getStaticJavaField(
+		s_InstallHelper_class, "MANAGE_CONTEXT_LOADER", "Z");
 	s_InstallHelper_hello = PgObject_getStaticJavaMethod(s_InstallHelper_class,
 		"hello",
 		"(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;"
 		"Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;"
-		"Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;");
+		"Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;"
+		"Ljava/lang/String;)Ljava/lang/String;");
 	s_InstallHelper_groundwork = PgObject_getStaticJavaMethod(
 		s_InstallHelper_class, "groundwork",
 		"(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ZZ)V");

@@ -3,13 +3,14 @@
 	<modelVersion>4.0.0</modelVersion>
 	<groupId>org.postgresql</groupId>
 	<artifactId>pljava.app</artifactId>
-	<version>1.5.0</version>
+	<version>1.6.10</version>
 	<packaging>pom</packaging>
 	<name>Greenplum PL/Java</name>
 	<url>http://gpdb.docs.pivotal.io/</url>
 	<description>Java stored procedures for Greenplum</description>
 	<properties>
 		<project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+		<pljava.pgxs.version>${project.version}</pljava.pgxs.version>
 	</properties>
 
 	<organization>
@@ -27,6 +28,15 @@
 	</licenses>
 
 	<mailingLists>
+		<mailingList>
+			<name>Mailing list for PL/Java users and developers</name>
+			<post>pljava-dev@lists.postgresql.org</post>
+			<archive>https://www.postgresql.org/list/pljava-dev/</archive>
+			<otherArchives>
+				<otherArchive>https://web.archive.org/web/*/http://lists.pgfoundry.org/pipermail/pljava-dev/</otherArchive>
+				<otherArchive>news://news.gmane.io/gmane.comp.db.postgresql.pljava</otherArchive>
+			</otherArchives>
+		</mailingList>
 		<mailingList>
 			<name>Mailing list for Greenplum developers</name>
 			<post>gpdb-dev@greenplum.org</post>
@@ -52,10 +62,10 @@
 		<module>pljava-api</module>
 		<module>pljava</module>
 		<module>pljava-so</module>
-		<module>pljava-deploy</module>
 		<module>pljava-ant</module>
 		<module>pljava-examples</module>
 		<module>pljava-packaging</module>
+		<module>pljava-pgxs</module>
 	</modules>
 
 	<!-- distributionManagement>
@@ -66,39 +76,84 @@
 		</site>
 	</distributionManagement -->
 
+	<profiles>
+		<profile>
+			<id>nashornmod</id>
+			<activation>
+				<jdk>[15,)</jdk>
+			</activation>
+			<build>
+				<plugins>
+					<plugin>
+						<groupId>org.apache.maven.plugins</groupId>
+						<artifactId>maven-antrun-plugin</artifactId>
+						<dependencies>
+							<dependency>
+								<groupId>org.openjdk.nashorn</groupId>
+								<artifactId>nashorn-core</artifactId>
+								<version>15.4</version>
+							</dependency>
+						</dependencies>
+					</plugin>
+				</plugins>
+			</build>
+		</profile>
+	</profiles>
+
+	<dependencies>
+		<dependency>
+			<groupId>junit</groupId>
+			<artifactId>junit</artifactId>
+			<version>4.13.1</version>
+			<scope>test</scope>
+		</dependency>
+	</dependencies>
+
 	<build>
+		<pluginManagement>
+			<plugins>
+				<plugin>
+					<groupId>org.apache.maven.plugins</groupId>
+					<artifactId>maven-install-plugin</artifactId>
+					<version>3.1.0</version><!-- version requires Java8+ -->
+				</plugin>
+				<plugin>
+					<groupId>org.apache.maven.plugins</groupId>
+					<artifactId>maven-resources-plugin</artifactId>
+					<version>3.3.0</version><!-- version requires Java 8+ -->
+				</plugin>
+				<plugin>
+					<groupId>org.apache.maven.plugins</groupId>
+					<artifactId>maven-compiler-plugin</artifactId>
+					<version>3.10.1</version><!-- version requires Java 8+ -->
+				</plugin>
+			</plugins>
+		</pluginManagement>
 		<plugins>
 			<plugin>
 				<groupId>org.apache.maven.plugins</groupId>
 				<artifactId>maven-compiler-plugin</artifactId>
-				<version>2.5.1</version>
 				<configuration>
-					<source>1.6</source>
-					<target>1.6</target>
 					<encoding>${project.build.sourceEncoding}</encoding>
+					<release>9</release><!-- we are building for Java 9 -->
+					<showDeprecation>true</showDeprecation>
+					<showWarnings>true</showWarnings>
 				</configuration>
 			</plugin>
 			<plugin>
 				<groupId>org.apache.maven.plugins</groupId>
 				<artifactId>maven-jar-plugin</artifactId>
-				<version>2.6</version>
+				<version>3.3.0</version><!-- version requires Java 8+ -->
+			</plugin>
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-surefire-plugin</artifactId>
+				<version>3.0.0-M7</version><!-- version requires Java 8+ -->
 			</plugin>
 			<plugin>
 				<groupId>org.apache.maven.plugins</groupId>
 				<artifactId>maven-site-plugin</artifactId>
-				<version>3.4</version>
-				<dependencies>
-					<dependency>
-						<groupId>org.apache.maven.doxia</groupId>
-						<artifactId>doxia-module-markdown</artifactId>
-						<version>1.6</version>
-					</dependency>
-					<dependency>
-						<groupId>net.trajano.wagon</groupId>
-						<artifactId>wagon-git</artifactId>
-						<version>2.0.4</version>
-					</dependency>
-				</dependencies>
+				<version>3.12.1</version><!-- version requires Java 8+ -->
 				<configuration>
 					<relativizeDecorationLinks>false</relativizeDecorationLinks>
 				</configuration>
@@ -118,19 +173,7 @@
 			<plugin>
 				<groupId>org.apache.maven.plugins</groupId>
 				<artifactId>maven-project-info-reports-plugin</artifactId>
-				<version>2.8</version>
-			</plugin>
-			<plugin>
-				<groupId>org.apache.maven.plugins</groupId>
-				<artifactId>maven-javadoc-plugin</artifactId>
-				<version>2.10.3</version>
-				<reportSets>
-					<reportSet>
-						<reports>
-							<report>javadoc-no-fork</report>
-						</reports>
-					</reportSet>
-				</reportSets>
+				<version>3.4.5</version><!-- version requires Java 8+ -->
 			</plugin>
 		</plugins>
 	</reporting>

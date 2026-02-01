@@ -1,12 +1,15 @@
 /*
- * Copyright (c) 2004, 2005, 2006 TADA AB - Taby Sweden
- * Copyright (c) 2010, 2011 PostgreSQL Global Development Group
+ * Copyright (c) 2004-2020 Tada AB and other contributors, as listed below.
  *
- * Distributed under the terms shown in the file COPYRIGHT
- * found in the root folder of this project or at
- * http://wiki.tada.se/index.php?title=PLJava_License
+ * All rights reserved. This program and the accompanying materials
+ * are made available under the terms of the The BSD 3-Clause License
+ * which accompanies this distribution, and is available at
+ * http://opensource.org/licenses/BSD-3-Clause
  *
- * @author Thomas Hallgren
+ * Contributors:
+ *   Tada AB
+ *   PostgreSQL Global Development Group
+ *   Chapman Flack
  */
 #include "pljava/type/Type_priv.h"
 #include "pljava/type/Array.h"
@@ -14,16 +17,15 @@
 
 static TypeClass s_booleanClass;
 static jclass    s_Boolean_class;
-static jclass    s_BooleanArray_class;
 static jmethodID s_Boolean_init;
 static jmethodID s_Boolean_booleanValue;
 
 /*
  * boolean primitive type.
  */
-static Datum _boolean_invoke(Type self, jclass cls, jmethodID method, jvalue* args, PG_FUNCTION_ARGS)
+static Datum _boolean_invoke(Type self, Function fn, PG_FUNCTION_ARGS)
 {
-	jboolean v = JNI_callStaticBooleanMethodA(cls, method, args);
+	jboolean v = pljava_Function_booleanInvoke(fn);
 	return BoolGetDatum(v);
 }
 
@@ -75,20 +77,8 @@ static Datum _booleanArray_coerceObject(Type self, jobject booleanArray)
 
 	v = createArrayType(nElems, sizeof(jboolean), BOOLOID, false);
 
-	if(!JNI_isInstanceOf( booleanArray, s_BooleanArray_class))
-		JNI_getBooleanArrayRegion((jbooleanArray)booleanArray, 0,
+	JNI_getBooleanArrayRegion((jbooleanArray)booleanArray, 0,
 					  nElems, (jboolean*)ARR_DATA_PTR(v));
-	else
-	{
-		int idx = 0;
-		jboolean *array = (jboolean*)ARR_DATA_PTR(v);
-
-		for(idx = 0; idx < nElems; ++idx)
-		{
-			array[idx] = JNI_callBooleanMethod(JNI_getObjectArrayElement(booleanArray, idx),
-							   s_Boolean_booleanValue);
-		}
-	}
 
 	PG_RETURN_ARRAYTYPE_P(v);
 }
@@ -129,7 +119,6 @@ void Boolean_initialize(void)
 	TypeClass cls;
 
 	s_Boolean_class = JNI_newGlobalRef(PgObject_getJavaClass("java/lang/Boolean"));
-	s_BooleanArray_class = JNI_newGlobalRef(PgObject_getJavaClass("[Ljava/lang/Boolean;"));
 	s_Boolean_init = PgObject_getJavaMethod(s_Boolean_class, "<init>", "(Z)V");
 	s_Boolean_booleanValue = PgObject_getJavaMethod(s_Boolean_class, "booleanValue", "()Z");
 

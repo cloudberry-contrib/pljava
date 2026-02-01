@@ -1,31 +1,111 @@
 /*
- * Copyright (c) 2004, 2005, 2006 TADA AB - Taby Sweden
- * Distributed under the terms shown in the file COPYRIGHT
- * found in the root folder of this project or at
- * http://eng.tada.se/osprojects/COPYRIGHT.html
+ * Copyright (c) 2004-2025 Tada AB and other contributors, as listed below.
+ *
+ * All rights reserved. This program and the accompanying materials
+ * are made available under the terms of the The BSD 3-Clause License
+ * which accompanies this distribution, and is available at
+ * http://opensource.org/licenses/BSD-3-Clause
+ *
+ * Contributors:
+ *   Tada AB
+ *   Chapman Flack
  */
 package org.postgresql.pljava.internal;
+
+import java.nio.charset.Charset;
 
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.HashMap;
+import static java.util.Objects.requireNonNull;
+import java.util.Properties;
 
 import org.postgresql.pljava.ObjectPool;
+import org.postgresql.pljava.PooledObject;
 import org.postgresql.pljava.SavepointListener;
 import org.postgresql.pljava.TransactionListener;
+import org.postgresql.pljava.sqlgen.Lexicals.Identifier;
+
 import org.postgresql.pljava.jdbc.SQLUtils;
 
+import org.postgresql.pljava.elog.ELogHandler;
+
+import static org.postgresql.pljava.internal.Backend.doInPG;
 
 /**
  * An instance of this interface reflects the current session. The attribute
- * store is transactional.
+ * store is deprecated. It had interesting transactional behavior until
+ * PL/Java 1.2.0, but since then it has behaved as any (non-null-allowing) Map.
+ * Anyone needing any sort of attribute store with transactional behavior will
+ * need to implement one and use a {@link TransactionListener} to keep it
+ * sync'd.
  *
  * @author Thomas Hallgren
  */
 public class Session implements org.postgresql.pljava.Session
 {
+	public static Session provider()
+	{
+		return Holder.INSTANCE;
+	}
+
+	private final Properties m_properties;
+
+	private Session()
+	{
+		/*
+		 * This strategy assumes that no user code will request a Session
+		 * instance until after InstallHelper has poked the frozen properties
+		 * into s_properties.
+		 */
+		m_properties = requireNonNull(s_properties);
+	}
+
+	private static class Holder
+	{
+		static final Session INSTANCE = new Session();
+	}
+
+	/**
+	 * An unmodifiable defensive copy of the Java system properties that will be
+	 * put here by InstallHelper via package access at startup.
+	 */
+	static Properties s_properties;
+
+	/**
+	 * The Java charset corresponding to the server encoding, or null if none
+	 * such was found. Put here by InstallHelper via package access at startup.
+	 */
+	static Charset s_serverCharset;
+
+	@Override
+	public Properties frozenSystemProperties()
+	{
+		return m_properties;
+	}
+
+	/**
+	 * A static method (not part of the API-exposed Session interface) by which
+	 * pljava implementation classes can get hold of the server charset without
+	 * the indirection of getting a Session instance. If there turns out to be
+	 * demand for client code to obtain it through the API, an interface method
+	 * {@code serverCharset} can easily be added later.
+	 * @return The Java Charset corresponding to the server's encoding, or null
+	 * if no matching Java charset was found. That can happen if a corresponding
+	 * Java charset really does exist but is not successfully found using the
+	 * name reported by PostgreSQL. That can be worked around by giving the
+	 * right name explicitly as the system property
+	 * {@code org.postgresql.server.encoding} in {@code pljava.vmoptions} for
+	 * the affected database (or cluster-wide, if the same encoding is used).
+	 */
+	public static Charset implServerCharset()
+	{
+		return s_serverCharset;
+	}
+
+	@SuppressWarnings("removal")
 	private final TransactionalMap m_attributes = new TransactionalMap(new HashMap());
 
 	/**
@@ -46,12 +126,24 @@ public class Session implements org.postgresql.pljava.Session
 		SubXactListener.addListener(listener);
 	}
 
+	/**
+	 * Get an attribute from the session's attribute store.
+	 * @deprecated {@code Session}'s attribute store once had a special, and
+	 * possibly useful, transactional behavior, but since PL/Java 1.2.0 it has
+	 * lacked that, and offers nothing you don't get with an ordinary
+	 * {@code Map} (that forbids nulls). If some kind of store with
+	 * transactional behavior is needed, it should be implemented in straight
+	 * Java and kept in sync by using a {@link TransactionListener}.
+	 */
+	@Override
+	@SuppressWarnings("removal")
+	@Deprecated(since="1.5.3", forRemoval=true)
 	public Object getAttribute(String attributeName)
 	{
 		return m_attributes.get(attributeName);
 	}
 
-	public ObjectPool getObjectPool(Class cls)
+	public <T extends PooledObject> ObjectPool<T> getObjectPool(Class<T> cls)
 	{
 		return ObjectPoolImpl.getObjectPool(cls);
 	}
@@ -69,17 +161,43 @@ public class Session implements org.postgresql.pljava.Session
 	}
 
 	@Override
+	@SuppressWarnings("removal")
+	@Deprecated(since="1.5.0", forRemoval=true)
 	public String getSessionUserName()
 	{
 		return getOuterUserName();
 	}
 
 
+	/**
+	 * Remove an attribute from the session's attribute store.
+	 * @deprecated {@code Session}'s attribute store once had a special, and
+	 * possibly useful, transactional behavior, but since PL/Java 1.2.0 it has
+	 * lacked that, and offers nothing you don't get with an ordinary
+	 * {@code Map} (that forbids nulls). If some kind of store with
+	 * transactional behavior is needed, it should be implemented in straight
+	 * Java and kept in sync by using a {@link TransactionListener}.
+	 */
+	@Override
+	@SuppressWarnings("removal")
+	@Deprecated(since="1.5.3", forRemoval=true)
 	public void removeAttribute(String attributeName)
 	{
 		m_attributes.remove(attributeName);
 	}
 
+	/**
+	 * Set an attribute in the session's attribute store.
+	 * @deprecated {@code Session}'s attribute store once had a special, and
+	 * possibly useful, transactional behavior, but since PL/Java 1.2.0 it has
+	 * lacked that, and offers nothing you don't get with an ordinary
+	 * {@code Map} (that forbids nulls). If some kind of store with
+	 * transactional behavior is needed, it should be implemented in straight
+	 * Java and kept in sync by using a {@link TransactionListener}.
+	 */
+	@Override
+	@SuppressWarnings("removal")
+	@Deprecated(since="1.5.3", forRemoval=true)
 	public void setAttribute(String attributeName, Object value)
 	{
 		m_attributes.put(attributeName, value);
@@ -104,6 +222,8 @@ public class Session implements org.postgresql.pljava.Session
 	}
 
 	@Override
+	@SuppressWarnings("removal")
+	@Deprecated(since="1.5.0", forRemoval=true)
 	public void executeAsSessionUser(Connection conn, String statement)
 	throws SQLException
 	{
@@ -115,7 +235,7 @@ public class Session implements org.postgresql.pljava.Session
 	throws SQLException
 	{
 		Statement stmt = conn.createStatement();
-		synchronized(Backend.THREADLOCK)
+		doInPG(() ->
 		{
 			ResultSet rs = null;
 			AclId outerUser = AclId.getOuterUser();
@@ -139,7 +259,7 @@ public class Session implements org.postgresql.pljava.Session
 				if ( changeSucceeded )
 					_setUser(effectiveUser, wasLocalChange);
 			}
-		}
+		});
 	}
 
 	/**
@@ -147,24 +267,24 @@ public class Session implements org.postgresql.pljava.Session
 	 * Currently used only in Commands.java. Not made visible API yet
 	 * because there <em>has</em> to be a more general way to do this.
 	 */
-	public String getOuterUserSchema()
+	public Identifier.Simple getOuterUserSchema()
 	throws SQLException
 	{
 		Statement stmt = SQLUtils.getDefaultConnection().createStatement();
-		synchronized(Backend.THREADLOCK)
+		return doInPG(() ->
 		{
 			ResultSet rs = null;
-			AclId sessionUser = AclId.getSessionUser();
+			AclId outerUser = AclId.getOuterUser();
 			AclId effectiveUser = AclId.getUser();
 			boolean wasLocalChange = false;
 			boolean changeSucceeded = false;
 			try
 			{
-				wasLocalChange = _setUser(sessionUser, true);
+				wasLocalChange = _setUser(outerUser, true);
 				changeSucceeded = true;
 				rs = stmt.executeQuery("SELECT current_schema()");
 				if ( rs.next() )
-					return rs.getString(1);
+					return Identifier.Simple.fromCatalog(rs.getString(1));
 				throw new SQLException("Unable to obtain current schema");
 			}
 			finally
@@ -174,21 +294,16 @@ public class Session implements org.postgresql.pljava.Session
 				if ( changeSucceeded )
 					_setUser(effectiveUser, wasLocalChange);
 			}
-		}
+		});
 	}
 
 	/**
 	 * Called from native code when the JVM is instantiated.
 	 */
-	static long init()
+	static void init()
 	throws SQLException
 	{
 		ELogHandler.init();
-		
-		// Should be replace with a Thread.getId() once we abandon
-		// Java 1.4
-		//
-		return System.identityHashCode(Thread.currentThread());
 	}
 
 	private static native boolean _setUser(AclId userId, boolean isLocalChange);

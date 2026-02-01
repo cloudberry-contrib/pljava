@@ -1,0 +1,83 @@
+# These only_commits and branches settings ought to pretty much suppress
+# Appveyor, whose runs have all been failing lately because of Maven repository
+# connection resets that don't seem reproducible locally. This can be revisited
+# later to see if things might be working again.
+only_commits:
+  message: /appveyor/
+branches:
+  only:
+    - appveyor
+image: Visual Studio 2019
+environment:
+  APPVEYOR_RDP_PASSWORD: MrRobot@2020
+  VCVARSALL: C:\Program Files (x86)\Microsoft Visual Studio 14.0\VC\vcvarsall.bat
+  matrix:
+    - SYS: MINGW
+      JDK: 11
+      PG: pacman
+    - SYS: MINGW
+      JDK: 17
+      PG: pacman
+    - SYS: MINGW
+      JDK: 19
+      PG: pacman
+    - SYS: MINGW
+      JDK: 21
+      PG: pacman
+    - SYS: MSVC
+      JDK: 21
+      PG: 15
+    - SYS: MSVC
+      JDK: 21
+      PG: 14
+    - SYS: MSVC
+      JDK: 21
+      PG: 13
+    - SYS: MSVC
+      JDK: 21
+      PG: 12
+    - SYS: MSVC
+      JDK: 11
+      PG: 9.6
+before_build:
+  - ps: .appveyor/appveyor_download_java.ps1
+  - set JAVA_HOME=%ProgramFiles%\Java\jdk%JDK%
+  - path %JAVA_HOME%\bin;%PATH%
+  - '"%VCVARSALL%" x86'
+  - '"%VCVARSALL%" amd64'
+  - ps: $Env:JAVA_HOME = "C:\Program Files\Java\jdk$Env:JDK"
+  - ps: $Env:Path = "$Env:JAVA_HOME\bin;" + $Env:Path
+build_script:
+  - .appveyor\appveyor_mingw_or_msvc.bat
+#  - ps: $blockRdp = $true; iex ((new-object net.webclient).DownloadString('https://raw.githubusercontent.com/appveyor/ci/master/scripts/enable-rdp.ps1'))
+test_script:
+  - ps: |
+      $pgConfig = $Env:pgConfig
+
+      $packageJar = ('pljava-packaging' |
+        Get-ChildItem -Recurse -Filter pljava-pg*.jar
+      ).FullName
+
+      $mavenRepo = "$env:UserProfile\.m2\repository"
+
+      $saxonVer = (Join-Path $mavenRepo "net\sf\saxon\Saxon-HE" |
+        Get-ChildItem -Recurse -Filter Saxon-HE-*.jar |
+        Select-Object -Last 1
+      ).Directory.Name
+
+      $jdbcJar = (Join-Path $mavenRepo "org\postgresql\postgresql" |
+        Get-ChildItem -Recurse -Filter postgresql-*.jar |
+        Select-Object -Last 1
+      ).FullName
+
+      jshell `
+        -execution local `
+        "-J--class-path=$packageJar;$jdbcJar" `
+        "--class-path=$packageJar" `
+        "-J--add-modules=java.sql.rowset,jdk.httpserver" `
+        "-J-Dpgconfig=$pgConfig" `
+        "-J-DmavenRepo=$mavenRepo" `
+        "-J-DsaxonVer=$saxonVer" `
+        "-J-DredirectError=true" `
+        "-J-DextractFiles=true" `
+        CI\integration

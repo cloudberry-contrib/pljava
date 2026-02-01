@@ -1,10 +1,15 @@
 /*
- * Copyright (c) 2004, 2005, 2006 TADA AB - Taby Sweden
- * Copyright (c) 2009, 2010, 2011 PostgreSQL Global Development Group
+ * Copyright (c) 2004-2025 Tada AB and other contributors, as listed below.
  *
- * Distributed under the terms shown in the file COPYRIGHT
- * found in the root folder of this project or at
- * http://eng.tada.se/osprojects/COPYRIGHT.html
+ * All rights reserved. This program and the accompanying materials
+ * are made available under the terms of the The BSD 3-Clause License
+ * which accompanies this distribution, and is available at
+ * http://opensource.org/licenses/BSD-3-Clause
+ *
+ * Contributors:
+ *   Tada AB
+ *   PostgreSQL Global Development Group
+ *   Chapman Flack
  */
 package org.postgresql.pljava.jdbc;
 
@@ -23,6 +28,7 @@ import java.sql.Date;
 import java.sql.NClob;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.ResultSetMetaData; // for javadoc link
 import java.sql.SQLClientInfoException;
 import java.sql.SQLException;
 import java.sql.SQLFeatureNotSupportedException;
@@ -65,11 +71,6 @@ import org.postgresql.pljava.internal.PgSavepoint;
 public class SPIConnection implements Connection
 {
 	/**
-	 * A map from Java classes to java.sql.Types integers.
-	 */
-	private static final HashMap s_sqlType2Class = new HashMap(30);
-	
-	/**
 	 * The version number of the currently executing PostgreSQL
 	 * server.
 	 */
@@ -79,6 +80,16 @@ public class SPIConnection implements Connection
 	 * Client info properties for JDBC 4.
 	 */
 	private Properties _clientInfo;
+
+	/**
+	 * A map from Java classes to java.sql.Types integers.
+	 *<p>
+	 * This map is only used by the (non-API) getTypeForClass method,
+	 * which, in turn, is only used for
+	 * {@link PreparedStatement#setObject(int,Object)}.
+	 */
+	private static final HashMap<Class<?>,Integer> s_class2sqlType =
+		new HashMap<>(30);
 
 	static
 	{
@@ -105,12 +116,32 @@ public class SPIConnection implements Connection
 
 	private static final void addType(Class clazz, int sqlType)
 	{
-		s_sqlType2Class.put(clazz, new Integer(sqlType));
+		s_class2sqlType.put(clazz, sqlType);
 	}
 
 	/**
-	 * Returns a default connection instance. It is the callers responsability
-	 * to close this instance.
+	 * Map a {@code Class} to a {@link Types} integer, as used in
+	 * (and only in) {@link PreparedStatement#setObject(int,Object)}.
+	 */
+	static int getTypeForClass(Class c)
+	{
+		if(c.isArray() && !c.equals(byte[].class))
+			return Types.ARRAY;
+
+		Integer sqt = s_class2sqlType.get(c);
+		if(sqt != null)
+			return sqt;
+
+		/*
+		 * This is not a well known JDBC type.
+		 */
+		return Types.OTHER;
+	}
+
+	/**
+	 * Returns a default connection instance. It is normally the caller's
+	 * responsibility to close this instance, but as {@code close} is a no-op
+	 * for this connection, that isn't critical.
 	 */
 	public static Connection getDefault()
 	throws SQLException
@@ -119,9 +150,9 @@ public class SPIConnection implements Connection
 	}
 
 	/**
-	 * Returns {@link ResultSet#CLOSE_CURSORS_AT_COMMIT}. Cursors are actually
-	 * closed when a function returns to SQL.
+	 * Returns {@link ResultSet#CLOSE_CURSORS_AT_COMMIT}.
 	 */
+	@Override
 	public int getHoldability()
 	{
 		return ResultSet.CLOSE_CURSORS_AT_COMMIT;
@@ -130,6 +161,7 @@ public class SPIConnection implements Connection
 	/**
 	 * Returns {@link Connection#TRANSACTION_READ_COMMITTED}.
 	 */
+	@Override
 	public int getTransactionIsolation()
 	{
 		return TRANSACTION_READ_COMMITTED;
@@ -139,6 +171,7 @@ public class SPIConnection implements Connection
 	 * Warnings are not yet supported.
 	 * @throws SQLException indicating that this feature is not supported.
 	 */
+	@Override
 	public void clearWarnings()
 	throws SQLException
 	{
@@ -148,6 +181,7 @@ public class SPIConnection implements Connection
 	/**
 	 * This is a no-op. The default connection never closes.
 	 */
+	@Override
 	public void close()
 	{
 	}
@@ -156,6 +190,7 @@ public class SPIConnection implements Connection
 	 * It's not legal to do a commit within a call from SQL.
 	 * @throws SQLException indicating that this feature is not supported.
 	 */
+	@Override
 	public void commit()
 	throws SQLException
 	{
@@ -166,6 +201,7 @@ public class SPIConnection implements Connection
 	 * It's not legal to do a rollback within a call from SQL.
 	 * @throws SQLException indicating that this feature is not supported.
 	 */
+	@Override
 	public void rollback()
 	throws SQLException
 	{
@@ -176,6 +212,7 @@ public class SPIConnection implements Connection
 	 * It is assumed that an SPI call is under transaction control. This method
 	 * will always return <code>false</code>.
 	 */
+	@Override
 	public boolean getAutoCommit()
 	{
 		return false;
@@ -184,6 +221,7 @@ public class SPIConnection implements Connection
 	/**
 	 * Will always return false.
 	 */
+	@Override
 	public boolean isClosed()
 	{
 		return false;
@@ -192,6 +230,7 @@ public class SPIConnection implements Connection
 	/**
 	 * Returns <code>false</code>. The SPIConnection is not real-only.
 	 */
+	@Override
 	public boolean isReadOnly()
 	{
 		return false;
@@ -201,6 +240,7 @@ public class SPIConnection implements Connection
 	 * Change of holdability is not supported.
 	 * @throws SQLException indicating that this feature is not supported.
 	 */
+	@Override
 	public void setHoldability(int holdability)
 	throws SQLException
 	{
@@ -211,6 +251,7 @@ public class SPIConnection implements Connection
 	 * Change of transaction isolation level is not supported.
 	 * @throws SQLException indicating that this feature is not supported.
 	 */
+	@Override
 	public void setTransactionIsolation(int level)
 	throws SQLException
 	{
@@ -222,6 +263,7 @@ public class SPIConnection implements Connection
 	 * that is not supported.
 	 * @throws SQLException indicating that this feature is not supported.
 	 */
+	@Override
 	public void setAutoCommit(boolean autoCommit)
 	throws SQLException
 	{
@@ -233,6 +275,7 @@ public class SPIConnection implements Connection
 	 * SPIConnection. Changing that is not supported. 
 	 * @throws SQLException indicating that this feature is not supported.
 	 */
+	@Override
 	public void setReadOnly(boolean readOnly)
 	throws SQLException
 	{
@@ -242,6 +285,7 @@ public class SPIConnection implements Connection
 	/**
 	 * Returns the database in which we are running.
 	 */
+	@Override
 	public String getCatalog()
 	throws SQLException
 	{
@@ -258,6 +302,7 @@ public class SPIConnection implements Connection
 	 * The catalog name cannot be set.
 	 * @throws SQLException indicating that this feature is not supported.
 	 */
+	@Override
 	public void setCatalog(String catalog)
 	throws SQLException
 	{
@@ -275,6 +320,7 @@ public class SPIConnection implements Connection
 	 * @return an SPIDatabaseMetaData object for this
 	 * <code>Connection</code> object
 	 */
+	@Override
 	public DatabaseMetaData getMetaData()
 	{
 		return new SPIDatabaseMetaData(this);
@@ -284,12 +330,14 @@ public class SPIConnection implements Connection
 	 * Warnings are not yet supported.
 	 * @throws SQLException indicating that this feature is not supported.
 	 */
+	@Override
 	public SQLWarning getWarnings()
 	throws SQLException
 	{
 		throw new UnsupportedFeatureException("Connection.getWarnings");
 	}
 
+	@Override
 	public void releaseSavepoint(Savepoint savepoint) throws SQLException
 	{
 		if(!(savepoint instanceof PgSavepoint))
@@ -300,6 +348,7 @@ public class SPIConnection implements Connection
 		forgetSavepoint(sp);
 	}
 
+	@Override
 	public void rollback(Savepoint savepoint) throws SQLException
 	{
 		if(!(savepoint instanceof PgSavepoint))
@@ -308,12 +357,12 @@ public class SPIConnection implements Connection
 		PgSavepoint sp = (PgSavepoint)savepoint;
 		Invocation.clearErrorCondition();
 		sp.rollback();
-		forgetSavepoint(sp);
 	}
 
 	/**
 	 * Creates a new instance of <code>SPIStatement</code>.
 	 */
+	@Override
 	public Statement createStatement()
 	throws SQLException
 	{
@@ -332,6 +381,7 @@ public class SPIConnection implements Connection
 	 *             <code>resultSetConcurrencty</code> differs from
 	 *             {@link ResultSet#CONCUR_READ_ONLY}.
 	 */
+	@Override
 	public Statement createStatement(
 		int resultSetType,
 		int resultSetConcurrency)
@@ -354,6 +404,7 @@ public class SPIConnection implements Connection
 	 *             differs from {@link ResultSet#CONCUR_READ_ONLY}, or if the
 	 *             resultSetHoldability differs from {@link ResultSet#CLOSE_CURSORS_AT_COMMIT}.
 	 */
+	@Override
 	public Statement createStatement(
 		int resultSetType,
 		int resultSetConcurrency,
@@ -369,7 +420,8 @@ public class SPIConnection implements Connection
 	/**
 	 * Returns <code>null</code>. Type map is not yet imlemented.
 	 */
-	public Map getTypeMap()
+	@Override
+	public Map<String,Class<?>> getTypeMap()
 	throws SQLException
 	{
 		return null;
@@ -379,7 +431,8 @@ public class SPIConnection implements Connection
 	 * Type map is not yet implemented.
 	 * @throws SQLException indicating that this feature is not supported.
 	 */
-	public void setTypeMap(Map map)
+	@Override
+	public void setTypeMap(Map<String,Class<?>> map)
 	throws SQLException
 	{
 		throw new UnsupportedOperationException("Type map is not yet implemented");
@@ -388,12 +441,17 @@ public class SPIConnection implements Connection
 	/**
 	 * Parse the JDBC SQL into PostgreSQL.
 	 */
+	@Override
 	public String nativeSQL(String sql)
 	throws SQLException
 	{
 		return this.nativeSQL(sql, null);
 	}
 	
+	/*
+	 * An internal nativeSQL that returns a count of substitutable parameters
+	 * detected, used in prepareStatement().
+	 */
 	public String nativeSQL(String sql, int[] paramCountRet)
 	{
 		StringBuffer buf = new StringBuffer();
@@ -422,7 +480,7 @@ public class SPIConnection implements Connection
 				//
 				if(inQuote == c)
 					inQuote = 0;
-				else
+				else if(inQuote == 0)
 					inQuote = c;
 				break;
 			
@@ -459,6 +517,7 @@ public class SPIConnection implements Connection
 	 * Procedure calls are not yet implemented.
 	 * @throws SQLException indicating that this feature is not supported.
 	 */
+	@Override
 	public CallableStatement prepareCall(String sql) throws SQLException
 	{
 		throw new UnsupportedOperationException("Procedure calls are not yet implemented");
@@ -468,6 +527,7 @@ public class SPIConnection implements Connection
 	 * Procedure calls are not yet implemented.
 	 * @throws SQLException indicating that this feature is not supported.
 	 */
+	@Override
 	public CallableStatement prepareCall(
 		String sql,
 		int resultSetType,
@@ -481,6 +541,7 @@ public class SPIConnection implements Connection
 	 * Procedure calls are not yet implemented.
 	 * @throws SQLException indicating that this feature is not supported.
 	 */
+	@Override
 	public CallableStatement prepareCall(
 		String sql,
 		int resultSetType,
@@ -494,6 +555,7 @@ public class SPIConnection implements Connection
 	/**
 	 * Creates a new instance of <code>SPIPreparedStatement</code>.
 	 */
+	@Override
 	public PreparedStatement prepareStatement(String sql)
 	throws SQLException
 	{
@@ -503,7 +565,6 @@ public class SPIConnection implements Connection
 		int[] pcount = new int[] { 0 };
 		sql = this.nativeSQL(sql, pcount);
 		PreparedStatement stmt = new SPIPreparedStatement(this, sql, pcount[0]);
-		Invocation.current().manageStatement(stmt);
 		return stmt;
 	}
 
@@ -511,6 +572,7 @@ public class SPIConnection implements Connection
 	 * Return of auto generated keys is not yet supported.
 	 * @throws SQLException indicating that this feature is not supported.
 	 */
+	@Override
 	public PreparedStatement prepareStatement(String sql, int autoGeneratedKeys)
 	throws SQLException
 	{
@@ -525,6 +587,7 @@ public class SPIConnection implements Connection
 	 *             ResultSet#TYPE_FORWARD_ONLY} or if the <code>resultSetConcurrencty</code>
 	 *             differs from {@link ResultSet#CONCUR_READ_ONLY}.
 	 */
+	@Override
 	public PreparedStatement prepareStatement(
 		String sql,
 		int resultSetType,
@@ -548,6 +611,7 @@ public class SPIConnection implements Connection
 	 *             differs from {@link ResultSet#CONCUR_READ_ONLY}, or if the
 	 *             resultSetHoldability differs from {@link ResultSet#CLOSE_CURSORS_AT_COMMIT}.
 	 */
+	@Override
 	public PreparedStatement prepareStatement(
 		String sql,
 		int resultSetType,
@@ -565,6 +629,7 @@ public class SPIConnection implements Connection
 	 * Return of auto generated keys is not yet supported.
 	 * @throws SQLException indicating that this feature is not supported.
 	 */
+	@Override
 	public PreparedStatement prepareStatement(String sql, int[] columnIndexes)
 	throws SQLException
 	{
@@ -575,39 +640,31 @@ public class SPIConnection implements Connection
 	 * Return of auto generated keys is not yet supported.
 	 * @throws SQLException indicating that this feature is not supported.
 	 */
+	@Override
 	public PreparedStatement prepareStatement(String sql, String[] columnNames)
 	throws SQLException
 	{
 		throw new UnsupportedFeatureException("Auto generated key support not yet implemented");
 	}
 
+	@Override
 	public Savepoint setSavepoint()
 	throws SQLException
 	{
-		return this.rememberSavepoint(PgSavepoint.set("anonymous_savepoint"));
+		return this.rememberSavepoint(PgSavepoint.set(null));
 	}
 
+	@Override
 	public Savepoint setSavepoint(String name)
 	throws SQLException
 	{
 		return this.rememberSavepoint(PgSavepoint.set(name));
 	}
 
-	static int getTypeForClass(Class c)
-	{
-		if(c.isArray() && !c.equals(byte[].class))
-			return Types.ARRAY;
-
-		Integer sqt = (Integer)s_sqlType2Class.get(c);
-		if(sqt != null)
-			return sqt.intValue();
-
-		/*
-		 * This is not a well known JDBC type.
-		 */
-		return Types.OTHER;
-	}
-
+	/*
+	 * An implementation factor of setSavepoint() to ensure that all such
+	 * savepoints are released when the function returns.
+	 */
 	private Savepoint rememberSavepoint(PgSavepoint sp)
 	throws SQLException
 	{
@@ -622,6 +679,10 @@ public class SPIConnection implements Connection
 		return sp;
 	}
 
+	/*
+	 * An implementation factor of releaseSavepoint()
+	 * undoing the registration done by rememberSavepoint().
+	 */
 	private static void forgetSavepoint(PgSavepoint sp)
 	throws SQLException
 	{
@@ -630,13 +691,18 @@ public class SPIConnection implements Connection
 			invocation.setSavepoint(null);
 	}
 
-    public int[] getVersionNumber() throws SQLException
+    /**
+	 * Return the server version number as a three-element {@code int} array
+	 * (of which the third may be null), as used in the
+	 * {@code getDatabase...Version} methods of {@link DatabaseMetaData}.
+	 */
+	public int[] getVersionNumber() throws SQLException
     {
         if (VERSION_NUMBER != null)
         	return VERSION_NUMBER;
 
         ResultSet rs = createStatement().executeQuery(
-            "SELECT version()");
+            "SELECT pg_catalog.version()");
 
         try
         {
@@ -674,25 +740,34 @@ public class SPIConnection implements Connection
         }
     }
 
-    /*
-     * This implemetation uses the jdbc3Types array to support the jdbc3
-     * datatypes.  Basically jdbc2 and jdbc3 are the same, except that
-     * jdbc3 adds some
-     */
+	/**
+	 * Convert a PostgreSQL type name to a {@link Types} integer, using the
+	 * {@code JDBC_TYPE_NAMES}/{@code JDBC_TYPE_NUMBERS} arrays; used in
+	 * {@link DatabaseMetaData} and {@link ResultSetMetaData}.
+	 */
     public int getSQLType(String pgTypeName)
     {
         if (pgTypeName == null)
             return Types.OTHER;
 
-        for (int i = 0;i < JDBC3_TYPE_NAMES.length;i++)
-            if (pgTypeName.equals(JDBC3_TYPE_NAMES[i]))
+        for (int i = 0;i < JDBC_TYPE_NAMES.length;i++)
+            if (pgTypeName.equals(JDBC_TYPE_NAMES[i]))
                 return JDBC_TYPE_NUMBERS[i];
 
         return Types.OTHER;
     }
 
-    /*
-     * This returns the java.sql.Types type for a PG type oid
+	/**
+	 * This returns the {@link Types} type for a PG type oid, by mapping it
+	 * to a name using {@link #getPGType} and then to the result via
+	 * {@link #getSQLType(String)}; used in {@link ResultSetMetaData} and
+	 * five places in {@link DatabaseMetaData}.
+	 *<p>
+	 * This method is a bit goofy, as it first maps from Oid to type name, and
+	 * then from name to JDBC type, all to accomplish the inverse of the JDBC
+	 * type / Oid mapping that already exists in Oid.c, and so the mapping
+	 * arrays in this file have to be updated in sync with that. Look into
+	 * future consolidation....
      *
      * @param oid PostgreSQL type oid
      * @return the java.sql.Types type
@@ -703,7 +778,12 @@ public class SPIConnection implements Connection
         return getSQLType(getPGType(oid));
     }
  
-    public String getPGType(Oid oid) throws SQLException
+	/**
+	 * Map the Oid of a PostgreSQL type to its name (specifically, the
+	 * {@code typname} attribute of {@code pg_type}. Used in
+	 * {@link DatabaseMetaData} and {@link ResultSetMetaData}.
+	 */
+	public String getPGType(Oid oid) throws SQLException
     {
         String typeName = null;
         PreparedStatement query = null;
@@ -735,11 +815,25 @@ public class SPIConnection implements Connection
         return typeName;
     }
 
-	static Object basicCoersion(Class cls, Object value)
+	/**
+	 * Apply some hardwired coercions from an object to a desired class,
+	 * where the class can be {@code String} or {@code URL}, as used in
+	 * {@code ObjectResultSet} for retrieving values and
+	 * {@code SingleRowWriter} for storing them, and also in
+	 * {@code SQLInputFromTuple} for UDTs mapping composite types.
+	 *<p>
+	 * Some review may be in order to determine just what part of JDBC's
+	 * type mapping rules this corresponds to. It seems strangely limited, and
+	 * the use of the same coercion in both the retrieval and storage direction
+	 * in {@code ResultSet}s seems a bit suspect, as does its use in UDT input
+	 * but not output with composites.
+	 */
+	@SuppressWarnings("unchecked")
+	static <T> T basicCoercion(Class<T> cls, Object value)
 	throws SQLException
 	{
 		if(value == null || cls.isInstance(value))
-			return value;
+			return (T)value;
 
 		if(cls == String.class)
 		{
@@ -748,13 +842,15 @@ public class SPIConnection implements Connection
 			|| value instanceof Timestamp
 			|| value instanceof Date
 			|| value instanceof Time)
-				return value.toString();
+				return (T)value.toString();
 		}
 		else if(cls == URL.class && value instanceof String)
 		{
 			try
 			{
-				return new URL((String)value);
+				@SuppressWarnings("deprecation") // PL/Java major rev or forever
+				T result = (T)new URL((String)value);
+				return result;
 			}
 			catch(MalformedURLException e)
 			{
@@ -765,7 +861,25 @@ public class SPIConnection implements Connection
 				cls.getName() + " from an object of class " + value.getClass().getName());
 	}
 
-	static Number basicNumericCoersion(Class cls, Object value)
+	/**
+	 * Apply some hardwired coercions from an object to a desired class,
+	 * one of Java's several numeric classes, when the value is an instance of
+	 * {@code Number}, {@code String}, or {@code Boolean}, as used in
+	 * {@code ObjectResultSet} for retrieving values and
+	 * {@code SingleRowWriter} for storing them, and also in
+	 * {@code SQLInputFromTuple} for UDTs mapping composite types.
+	 *<p>
+	 * Some review may be in order to determine just what part of JDBC's
+	 * type mapping rules this corresponds to. It seems strangely limited, and
+	 * the use of the same coercion in both the retrieval and storage direction
+	 * in {@code ResultSet}s seems a bit suspect, as does its use in UDT input
+	 * but not output with composites.
+	 *<p>
+	 * Oddly, this doesn't promise to return a subclass of its {@code cls}
+	 * parameter: if {@code value} is a {@code Number}, it is returned directly
+	 * no matter what {@code cls} was requested.
+	 */
+	static Number basicNumericCoercion(Class cls, Object value)
 	throws SQLException
 	{
 		if(value == null || value instanceof Number)
@@ -777,7 +891,7 @@ public class SPIConnection implements Connection
 				return Long.valueOf((String)value);
 
 			if(value instanceof Boolean)
-				return new Long(((Boolean)value).booleanValue() ? 1 : 0);
+				return ((Boolean)value) ? 1 : 0;
 		}
 		else if(cls == BigDecimal.class)
 		{
@@ -793,19 +907,34 @@ public class SPIConnection implements Connection
 				return Double.valueOf((String)value);
 
 			if(value instanceof Boolean)
-				return new Double(((Boolean)value).booleanValue() ? 1 : 0);
+				return ((Boolean)value) ? 1 : 0;
 		}
 		throw new SQLException("Cannot derive a Number from an object of class " + value.getClass().getName());
 	}
 
-	static Object basicCalendricalCoersion(Class cls, Object value, Calendar cal)
+	/**
+	 * Apply some hardwired coercions from an object to a desired class,
+	 * where the class may be {@link Timestamp}, {@link Date}, or {@link Time}
+	 * and the value one of those or {@code String}, as used in
+	 * {@code ObjectResultSet} for retrieving values and
+	 * {@code SingleRowWriter} for storing them, but <em>not</em> also in
+	 * {@code SQLInputFromTuple} for UDTs mapping composite types.
+	 *<p>
+	 * Some review may be in order to determine just what part of JDBC's
+	 * type mapping rules this corresponds to. It seems strangely limited, and
+	 * the use of the same coercion in both the retrieval and storage direction
+	 * in {@code ResultSet}s seems a bit suspect.
+	 */
+	@SuppressWarnings("unchecked")
+	static <T> T basicCalendricalCoercion(
+		Class<T> cls, Object value, Calendar cal)
 	throws SQLException
 	{
 		if(value == null)
-			return value;
+			return null;
 
 		if(cls.isInstance(value))
-			return value;
+			return (T)value;
 
 		if(cls == Timestamp.class)
 		{
@@ -816,17 +945,17 @@ public class SPIConnection implements Connection
 				cal.set(Calendar.MINUTE, 0);
 				cal.set(Calendar.SECOND, 0);
 				cal.set(Calendar.MILLISECOND, 0);
-				return new Timestamp(cal.getTimeInMillis());
+				return (T)new Timestamp(cal.getTimeInMillis());
 			}
 			else if(value instanceof Time)
 			{
 				cal.setTime((Date)value);
 				cal.set(1970, 0, 1);
-				return new Timestamp(cal.getTimeInMillis());
+				return (T)new Timestamp(cal.getTimeInMillis());
 			}
 			else if(value instanceof String)
 			{
-				return Timestamp.valueOf((String)value);
+				return (T)Timestamp.valueOf((String)value);
 			}
 		}
 		else if(cls == Date.class)
@@ -839,11 +968,11 @@ public class SPIConnection implements Connection
 				cal.set(Calendar.MINUTE, 0);
 				cal.set(Calendar.SECOND, 0);
 				cal.set(Calendar.MILLISECOND, 0);
-				return new Date(cal.getTimeInMillis());
+				return (T)new Date(cal.getTimeInMillis());
 			}
 			else if(value instanceof String)
 			{
-				return Date.valueOf((String)value);
+				return (T)Date.valueOf((String)value);
 			}
 		}
 		else if(cls == Time.class)
@@ -853,11 +982,11 @@ public class SPIConnection implements Connection
 				Timestamp ts = (Timestamp)value;
 				cal.setTime(ts);
 				cal.set(1970, 0, 1);
-				return new Time(cal.getTimeInMillis());
+				return (T)new Time(cal.getTimeInMillis());
 			}
 			else if(value instanceof String)
 			{
-				return Time.valueOf((String)value);
+				return (T)Time.valueOf((String)value);
 			}
 		}
 		throw new SQLException("Cannot derive a value of class " +
@@ -870,10 +999,13 @@ public class SPIConnection implements Connection
      * They default automatically to Types.OTHER
      *
      * Note: This must be in the same order as below.
+	 *
+	 * These arrays are not only used by getSQLType() in this file, but also
+	 * directly accessed by getUDTs() in DatabaseMetaData.
      *
      * Tip: keep these grouped together by the Types. value
      */
-    public static final String JDBC3_TYPE_NAMES[] = {
+    public static final String JDBC_TYPE_NAMES[] = {
                 "int2",
                 "int4", "oid",
                 "int8",
@@ -889,6 +1021,7 @@ public class SPIConnection implements Connection
                 "date",
                 "time", "timetz",
                 "abstime", "timestamp", "timestamptz",
+				"xml",
                 "_bool", "_char", "_int2", "_int4", "_text",
                 "_oid", "_varchar", "_int8", "_float4", "_float8",
                 "_abstime", "_date", "_time", "_timestamp", "_numeric",
@@ -902,47 +1035,43 @@ public class SPIConnection implements Connection
      *
      * Tip: keep these grouped together by the Types. value
      */
-    public static final int JDBC_TYPE_NUMBERS[] =
-    		{
-                Types.SMALLINT,
-                Types.INTEGER, Types.INTEGER,
-                Types.BIGINT,
-                Types.DOUBLE, Types.DOUBLE,
-                Types.NUMERIC,
-                Types.REAL,
-                Types.DOUBLE,
-                Types.CHAR, Types.CHAR, Types.CHAR, Types.CHAR, Types.CHAR, Types.CHAR,
-                Types.VARCHAR, Types.VARCHAR, Types.VARCHAR, Types.VARCHAR,
-                Types.BINARY,
-                Types.BOOLEAN,
-                Types.BIT,
-                Types.DATE,
-                Types.TIME, Types.TIME,
-                Types.TIMESTAMP, Types.TIMESTAMP, Types.TIMESTAMP,
-                Types.ARRAY, Types.ARRAY, Types.ARRAY, Types.ARRAY, Types.ARRAY,
-                Types.ARRAY, Types.ARRAY, Types.ARRAY, Types.ARRAY, Types.ARRAY,
-                Types.ARRAY, Types.ARRAY, Types.ARRAY, Types.ARRAY, Types.ARRAY,
-                Types.ARRAY
-            };
+    public static final int JDBC_TYPE_NUMBERS[];
 
-	// ************************************************************
-	// Non-implementation of JDBC 4 methods.
-	// ************************************************************
-
-	public Struct createStruct( String typeName, Object[] attributes )
-		throws SQLException
+	static
 	{
-		throw new SQLFeatureNotSupportedException(
-			"SPIConnection.createStruct( String, Object[] ) not implemented yet.", "0A000" );
+		JDBC_TYPE_NUMBERS = new int[]
+		{
+			Types.SMALLINT,
+			Types.INTEGER, Types.INTEGER,
+			Types.BIGINT,
+			Types.DOUBLE, Types.DOUBLE,
+			Types.NUMERIC,
+			Types.REAL,
+			Types.DOUBLE,
+			Types.CHAR,Types.CHAR,Types.CHAR,Types.CHAR,Types.CHAR,Types.CHAR,
+			Types.VARCHAR, Types.VARCHAR, Types.VARCHAR, Types.VARCHAR,
+			Types.BINARY,
+			Types.BOOLEAN,
+			Types.BIT,
+			Types.DATE,
+			Types.TIME, Types.TIME_WITH_TIMEZONE,
+			Types.TIMESTAMP, Types.TIMESTAMP, Types.TIMESTAMP_WITH_TIMEZONE,
+			Types.SQLXML,
+			Types.ARRAY, Types.ARRAY, Types.ARRAY, Types.ARRAY, Types.ARRAY,
+			Types.ARRAY, Types.ARRAY, Types.ARRAY, Types.ARRAY, Types.ARRAY,
+			Types.ARRAY, Types.ARRAY, Types.ARRAY, Types.ARRAY, Types.ARRAY,
+			Types.ARRAY
+        };
 	}
 
-	public Array createArrayOf(String typeName, Object[] elements)
-	throws SQLException
-	{
-		throw new SQLFeatureNotSupportedException(
-			"SPIConnection.createArrayOf( String, Object[] ) not implemented yet.", "0A000" );
-	}
+	// ************************************************************
+	// Implementation of JDBC 4 methods. Methods go here if they
+	// don't throw SQLFeatureNotSupportedException; they can be
+	// considered implemented even if they do nothing useful, as
+	// long as that's an allowed behavior by the JDBC spec.
+	// ************************************************************
 
+	@Override
 	public boolean isValid( int timeout )
 	throws SQLException
 	{
@@ -950,77 +1079,67 @@ public class SPIConnection implements Connection
 			     // ready, right?
 	}
 
-	public SQLXML createSQLXML()
-	throws SQLException
-	{
-		throw new SQLFeatureNotSupportedException( "SPIConnection.createSQLXML() not implemented yet.",
-			"0A000" );
-	}
-	public NClob createNClob()
-	throws SQLException
-	{
-		throw new SQLFeatureNotSupportedException( "SPIConnection.createNClob() not implemented yet.",
-			"0A000" );
-	}
-	public Blob createBlob()
-	throws SQLException
-	{
-		throw new SQLFeatureNotSupportedException( "SPIConnection.createBlob() not implemented yet.",
-			"0A000" );
-	}
-	public Clob createClob()
-	throws SQLException
-	{
-		throw new SQLFeatureNotSupportedException( "SPIConnection.createClob() not implemented yet.",
-			"0A000" );
-	}
-
+	@Override
 	public boolean isWrapperFor(Class<?> iface)
 	throws SQLException
 	{
-	    throw new SQLFeatureNotSupportedException
-		( this.getClass()
-		  + ".isWrapperFor( Class<?> ) not implemented yet.",
-		  "0A000" );
+	    return iface.isInstance(this);
 	}
 
+	@Override
 	public <T> T unwrap(Class<T> iface)
 	throws SQLException
 	{
-	    throw new SQLFeatureNotSupportedException
-		( this.getClass()
-		  + ".unwrapClass( Class<?> ) not implemented yet.",
+	    if ( iface.isInstance(this) )
+			return iface.cast(this);
+		throw new SQLFeatureNotSupportedException
+		( this.getClass().getSimpleName()
+		  + " does not wrap " + iface.getName(),
 		  "0A000" );
 	}
 
-       public void setClientInfo(String name, String value) throws SQLClientInfoException
-       {
-               Map<String, ClientInfoStatus> failures = new HashMap<String, ClientInfoStatus>();
-               failures.put(name, ClientInfoStatus.REASON_UNKNOWN_PROPERTY);
-               throw new SQLClientInfoException("ClientInfo property not supported.", failures);
-       }
+	/*
+	 * These ClientInfo implementations behave as if there are no known
+	 * ClientInfo properties, which is an allowable implementation. However,
+	 * there is a PostgreSQL notion corresponding to ApplicationName, so a
+	 * later extension of these to recognize that property would not be amiss.
+	 */
+
+	@Override
+	public void setClientInfo(String name, String value)
+	throws SQLClientInfoException
+	{
+		Map<String, ClientInfoStatus> failures = new HashMap<>();
+		failures.put(name, ClientInfoStatus.REASON_UNKNOWN_PROPERTY);
+		throw new SQLClientInfoException(
+			"ClientInfo property not supported.", failures);
+	}
 
 
+	@Override
 	public void setClientInfo(Properties properties) 
 		throws SQLClientInfoException
 	{
 		if (properties == null || properties.size() == 0)
 			return;
 
-		Map<String, ClientInfoStatus> failures = new HashMap<String, ClientInfoStatus>();
+		Map<String, ClientInfoStatus> failures = new HashMap<>();
 
 		Iterator<String> i = properties.stringPropertyNames().iterator();
 		while (i.hasNext()) {
 			failures.put(i.next(), ClientInfoStatus.REASON_UNKNOWN_PROPERTY);
 		}
-		throw new SQLClientInfoException("ClientInfo property not supported.", failures);
+		throw new SQLClientInfoException(
+			"ClientInfo property not supported.", failures);
 	}
 
+	@Override
 	public String getClientInfo(String name) throws SQLException
 	{
 		return null;
 	}
 
+	@Override
 	public Properties getClientInfo() throws SQLException
 	{
 		if (_clientInfo == null) {
@@ -1029,34 +1148,94 @@ public class SPIConnection implements Connection
 		return _clientInfo;
 	}
 
-  public void abort(Executor executor) throws SQLException
-  {
+	@Override
+	public SQLXML createSQLXML()
+	throws SQLException
+	{
+		return SQLXMLImpl.newWritable();
+	}
+
+	// ************************************************************
+	// Non-implementation of JDBC 4 methods.
+	// ************************************************************
+
+	@Override
+	public Struct createStruct( String typeName, Object[] attributes )
+		throws SQLException
+	{
+		throw new SQLFeatureNotSupportedException(
+			"SPIConnection.createStruct( String, Object[] ) not implemented yet.", "0A000" );
+	}
+
+	@Override
+	public Array createArrayOf(String typeName, Object[] elements)
+	throws SQLException
+	{
+		throw new SQLFeatureNotSupportedException(
+			"SPIConnection.createArrayOf( String, Object[] ) not implemented yet.", "0A000" );
+	}
+
+	@Override
+	public NClob createNClob()
+	throws SQLException
+	{
+		throw new SQLFeatureNotSupportedException( "SPIConnection.createNClob() not implemented yet.",
+			"0A000" );
+	}
+
+	@Override
+	public Blob createBlob()
+	throws SQLException
+	{
+		throw new SQLFeatureNotSupportedException( "SPIConnection.createBlob() not implemented yet.",
+			"0A000" );
+	}
+
+	@Override
+	public Clob createClob()
+	throws SQLException
+	{
+		throw new SQLFeatureNotSupportedException( "SPIConnection.createClob() not implemented yet.",
+			"0A000" );
+	}
+
+	// ************************************************************
+	// Non-implementation of JDBC 4.1 methods.
+	// ************************************************************
+
+	@Override
+	public void abort(Executor executor) throws SQLException
+	{
 		throw new SQLFeatureNotSupportedException(
 			"SPIConnection.abort(Executor) not implemented yet.", "0A000" );
-  }
+	}
 
-  public int getNetworkTimeout() throws SQLException
-  {
+	@Override
+	public int getNetworkTimeout() throws SQLException
+	{
 		throw new SQLFeatureNotSupportedException(
 			"SPIConnection.getNetworkTimeout() not implemented yet.", "0A000" );
 	}
 
-  public void setNetworkTimeout(Executor executor, int milliseconds)
-    throws SQLException
-  {
+	@Override
+	public void setNetworkTimeout(Executor executor, int milliseconds)
+		throws SQLException
+	{
 		throw new SQLFeatureNotSupportedException(
 			"SPIConnection.setNetworkTimeout(Executor,int) not implemented yet.", "0A000" );
-  }
+	}
 
-  public String getSchema() throws SQLException
-  {
+	@Override
+	public String getSchema() throws SQLException
+	{
 		throw new SQLFeatureNotSupportedException(
 			"SPIConnection.getSchema() not implemented yet.", "0A000" );
-  }
+	}
 
-  public void setSchema(String schema) throws SQLException
-  {
+	@Override
+	public void setSchema(String schema) throws SQLException
+	{
 		throw new SQLFeatureNotSupportedException(
 			"SPIConnection.setSchema(String) not implemented yet.", "0A000" );
-  }
+	}
 }	

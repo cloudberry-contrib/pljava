@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2004-2013 Tada AB and other contributors, as listed below.
+ * Copyright (c) 2004-2020 Tada AB and other contributors, as listed below.
  *
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the The BSD 3-Clause License
@@ -9,6 +9,7 @@
  * Contributors:
  *   Tada AB
  *   Filip Hrbek
+ *   Chapman Flack
  */
 package org.postgresql.pljava.example;
 
@@ -49,7 +50,7 @@ public class MetaDataTest {
 				.getConnection("jdbc:default:connection");
 		DatabaseMetaData md = conn.getMetaData();
 		ResultSet rs;
-		m_results = new ArrayList<String>();
+		m_results = new ArrayList<>();
 		StringBuffer result;
 
 		parseMethodCall(methodCall);
@@ -136,8 +137,8 @@ public class MetaDataTest {
 			String paramString;
 			String auxParamString;
 			String param;
-			ArrayList<Object> objects = new ArrayList<Object>();
-			ArrayList<Class<?>> types = new ArrayList<Class<?>>();
+			ArrayList<Object> objects = new ArrayList<>();
+			ArrayList<Class<?>> types = new ArrayList<>();
 
 			if (m.matches()) {
 				m_methodName = m.group(1);
@@ -182,7 +183,7 @@ public class MetaDataTest {
 								.compile("^\\s*\"((?:[^\\\\\"]|\\\\.)*)\"\\s*(?:,|$)(.*)$");
 						Matcher marr;
 						String auxParamArr = param.trim();
-						ArrayList<String> strList = new ArrayList<String>();
+						ArrayList<String> strList = new ArrayList<>();
 
 						while (!auxParamArr.equals("")) {
 							marr = parr.matcher(auxParamArr);
@@ -201,7 +202,7 @@ public class MetaDataTest {
 																				// a
 																				// boolean
 					{
-						objects.add(new Boolean(param));
+						objects.add(Boolean.valueOf(param));
 						types.add(Boolean.TYPE);
 					} else if (param.startsWith("(")) // it is String, String[]
 														// or int[] null
@@ -238,7 +239,7 @@ public class MetaDataTest {
 								.compile("^\\s*(\\d+)\\s*(?:,|$)(.*)$");
 						Matcher marr;
 						String auxParamArr = param.trim();
-						ArrayList<Integer> intList = new ArrayList<Integer>();
+						ArrayList<Integer> intList = new ArrayList<>();
 
 						while (!auxParamArr.equals("")) {
 							marr = parr.matcher(auxParamArr);
@@ -247,14 +248,14 @@ public class MetaDataTest {
 										+ param);
 							}
 
-							intList.add(new Integer(marr.group(1)));
+							intList.add(Integer.valueOf(marr.group(1)));
 							auxParamArr = marr.group(2).trim();
 						}
 						objects.add(intList.toArray(new Integer[0]));
 						types.add(int[].class);
 					} else // it is an int
 					{
-						objects.add(new Integer(param));
+						objects.add(Integer.valueOf(param));
 						types.add(Integer.TYPE);
 					}
 

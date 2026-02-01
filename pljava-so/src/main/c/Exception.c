@@ -1,8 +1,14 @@
 /*
- * Copyright (c) 2004, 2005, 2006 TADA AB - Taby Sweden
- * Distributed under the terms shown in the file COPYRIGHT
- * found in the root folder of this project or at
- * http://eng.tada.se/osprojects/COPYRIGHT.html
+ * Copyright (c) 2004-2025 Tada AB and other contributors, as listed below.
+ *
+ * All rights reserved. This program and the accompanying materials
+ * are made available under the terms of the The BSD 3-Clause License
+ * which accompanies this distribution, and is available at
+ * http://opensource.org/licenses/BSD-3-Clause
+ *
+ * Contributors:
+ *   Tada AB
+ *   Chapman Flack
  *
  * @author Thomas Hallgren
  */
@@ -19,14 +25,18 @@
 
 jclass Class_class;
 jmethodID Class_getName;
+jmethodID Class_getCanonicalName;
 
 jclass    ServerException_class;
 jmethodID ServerException_getErrorData;
-jmethodID ServerException_init;
+jmethodID ServerException_obtain;
 
 jclass    Throwable_class;
 jmethodID Throwable_getMessage;
 jmethodID Throwable_printStackTrace;
+
+static jclass    UnhandledPGException_class;
+static jmethodID UnhandledPGException_obtain;
 
 jclass    IllegalArgumentException_class;
 jmethodID IllegalArgumentException_init;
@@ -38,7 +48,13 @@ jmethodID SQLException_getSQLState;
 jclass    UnsupportedOperationException_class;
 jmethodID UnsupportedOperationException_init;
 
+jclass    NoSuchFieldError_class;
 jclass    NoSuchMethodError_class;
+
+bool Exception_isPGUnhandled(jthrowable ex)
+{
+	return JNI_isInstanceOf(ex, UnhandledPGException_class);
+}
 
 void
 Exception_featureNotSupported(const char* requestedFeature, const char* introVersion)
@@ -53,7 +69,13 @@ Exception_featureNotSupported(const char* requestedFeature, const char* introVer
 		appendStringInfoString(&buf, requestedFeature);
 		appendStringInfoString(&buf, " lacks support in PostgreSQL version ");
 		appendStringInfo(&buf, "%d.%d",
-						PG_VERSION_NUM / 10000, (PG_VERSION_NUM / 100) % 100);
+						PG_VERSION_NUM / 10000,
+#if PG_VERSION_NUM >= 100000
+						(PG_VERSION_NUM) % 10000
+#else
+						(PG_VERSION_NUM / 100) % 100
+#endif
+		);
 		appendStringInfoString(&buf, ". It was introduced in version ");
 		appendStringInfoString(&buf, introVersion);
 	
@@ -149,17 +171,34 @@ void Exception_throwSPI(const char* function, int errCode)
 			SPI_result_code_string(errCode));
 }
 
+void Exception_throw_unhandled()
+{
+	jobject ex;
+	PG_TRY();
+	{
+		ex = JNI_callStaticObjectMethodLocked(
+			UnhandledPGException_class, UnhandledPGException_obtain);
+		JNI_throw(ex);
+	}
+	PG_CATCH();
+	{
+		elog(WARNING, "Exception while generating exception");
+	}
+	PG_END_TRY();
+}
+
 void Exception_throw_ERROR(const char* funcName)
 {
 	jobject ex;
 	PG_TRY();
 	{
-		jobject ed = ErrorData_getCurrentError();
+		jobject ed = pljava_ErrorData_getCurrentError();
 	
 		FlushErrorState();
 	
-		ex = JNI_newObject(ServerException_class, ServerException_init, ed);
-		currentInvocation->errorOccured = true;
+		ex = JNI_callStaticObjectMethodLocked(
+			ServerException_class, ServerException_obtain, ed);
+		currentInvocation->errorOccurred = true;
 
 		elog(DEBUG2, "Exception in function %s", funcName);
 
@@ -192,16 +231,29 @@ void Exception_initialize(void)
 	UnsupportedOperationException_class = (jclass)JNI_newGlobalRef(PgObject_getJavaClass("java/lang/UnsupportedOperationException"));
 	UnsupportedOperationException_init = PgObject_getJavaMethod(UnsupportedOperationException_class, "<init>", "(Ljava/lang/String;)V");
 
+	NoSuchFieldError_class = (jclass)JNI_newGlobalRef(PgObject_getJavaClass("java/lang/NoSuchFieldError"));
 	NoSuchMethodError_class = (jclass)JNI_newGlobalRef(PgObject_getJavaClass("java/lang/NoSuchMethodError"));
 
 	Class_getName = PgObject_getJavaMethod(Class_class, "getName", "()Ljava/lang/String;");
+	Class_getCanonicalName = PgObject_getJavaMethod(Class_class,
+		"getCanonicalName", "()Ljava/lang/String;");
 }
 
 extern void Exception_initialize2(void);
 void Exception_initialize2(void)
 {
 	ServerException_class = (jclass)JNI_newGlobalRef(PgObject_getJavaClass("org/postgresql/pljava/internal/ServerException"));
-	ServerException_init = PgObject_getJavaMethod(ServerException_class, "<init>", "(Lorg/postgresql/pljava/internal/ErrorData;)V");
+	ServerException_obtain = PgObject_getStaticJavaMethod(
+		ServerException_class, "obtain",
+		"(Lorg/postgresql/pljava/internal/ErrorData;)"
+		"Lorg/postgresql/pljava/internal/ServerException;");
 
 	ServerException_getErrorData = PgObject_getJavaMethod(ServerException_class, "getErrorData", "()Lorg/postgresql/pljava/internal/ErrorData;");
+
+	UnhandledPGException_class = (jclass)JNI_newGlobalRef(
+		PgObject_getJavaClass(
+			"org/postgresql/pljava/internal/UnhandledPGException"));
+	UnhandledPGException_obtain = PgObject_getStaticJavaMethod(
+		UnhandledPGException_class, "obtain",
+		"()Lorg/postgresql/pljava/internal/UnhandledPGException;");
 }

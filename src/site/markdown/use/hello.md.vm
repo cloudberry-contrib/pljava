@@ -118,8 +118,16 @@ individual projects with shorter `pom.xml` files naming this as the parent.
     <plugins>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.10.1</version>
+        <configuration>
+          <release>9</release>
+        </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-jar-plugin</artifactId>
-        <version>2.6</version>
+        <version>3.3.0</version>
         <configuration>
           <archive>
             <manifest>
@@ -286,7 +294,7 @@ The [@Function annotation][funcanno] declares that the `hello` function should
 be available from SQL, so a `pljava.ddr` file will be added to the jar,
 containing the SQL commands to make that happen.
 
-[funcanno]: ../pljava-api/apidocs/index.html?org/postgresql/pljava/annotation/Function.html
+[funcanno]: ../pljava-api/apidocs/org.postgresql.pljava/org/postgresql/pljava/annotation/Function.html
 
 One more try with `mvn clean package` and there it is:
 
@@ -314,16 +322,16 @@ SQLActions[]={
 "BEGIN INSTALL
 BEGIN PostgreSQL
 CREATE OR REPLACE FUNCTION hello(
-	toWhom varchar)
-	RETURNS varchar
+	toWhom pg_catalog.varchar)
+	RETURNS pg_catalog.varchar
 	LANGUAGE java VOLATILE
-	AS 'com.example.proj.Hello.hello(java.lang.String)'
+	AS 'java.lang.String=com.example.proj.Hello.hello(java.lang.String)'
 END PostgreSQL;
 END INSTALL",
 "BEGIN REMOVE
 BEGIN PostgreSQL
 DROP FUNCTION hello(
-	toWhom varchar)
+	toWhom pg_catalog.varchar)
 END PostgreSQL;
 END REMOVE"
 }
@@ -455,6 +463,6 @@ From here, consider:
 * The user guide pages [on the wiki][uwik]
 * The many pre-built [examples][]
 
-[pljapi]: ../pljava-api/apidocs/index.html?org/postgresql/pljava/package-summary.html#package_description
+[pljapi]: ../pljava-api/apidocs/org.postgresql.pljava/org/postgresql/pljava/package-summary.html#package-description
 [uwik]: https://github.com/tada/pljava/wiki/User-guide
 [examples]: ../examples/examples.html

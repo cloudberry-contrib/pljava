@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2004-2013 Tada AB and other contributors, as listed below.
+ * Copyright (c) 2004-2020 Tada AB and other contributors, as listed below.
  *
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the The BSD 3-Clause License
@@ -9,6 +9,7 @@
  * Contributors:
  *   Tada AB
  *   Filip Hrbek
+ *   Chapman Flack
  */
 package org.postgresql.pljava.example;
 
@@ -65,8 +66,8 @@ public class MetaDataInts implements ResultSetProvider {
 		Class<?> returntype;
 		Object[] args = new Object[0];
 		Integer result = null;
-		ArrayList<String> mn = new ArrayList<String>();
-		ArrayList<Integer> mr = new ArrayList<Integer>();
+		ArrayList<String> mn = new ArrayList<>();
+		ArrayList<Integer> mr = new ArrayList<>();
 
 		for (int i = 0; i < m.length; i++) {
 			prototype = m[i].getParameterTypes();
@@ -82,10 +83,10 @@ public class MetaDataInts implements ResultSetProvider {
 			} catch (InvocationTargetException e) {
 				log.config("Method: " + m[i].getName() + " => "
 						+ e.getTargetException().getMessage());
-				result = new Integer(-1);
+				result = -1;
 			} catch (Exception e) {
-				log.config("Method: " + m[i].getName() + " => " + e.getMessage());
-				result = new Integer(-1);
+				log.info("Method: " + m[i].getName() + " => " + e.getMessage());
+				result = -1;
 			}
 
 			mn.add(m[i].getName());

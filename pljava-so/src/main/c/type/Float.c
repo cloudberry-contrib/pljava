@@ -1,12 +1,15 @@
 /*
- * Copyright (c) 2004, 2005, 2006 TADA AB - Taby Sweden
- * Copyright (c) 2010, 2011 PostgreSQL Global Development Group
+ * Copyright (c) 2004-2020 Tada AB and other contributors, as listed below.
  *
- * Distributed under the terms shown in the file COPYRIGHT
- * found in the root folder of this project or at
- * http://wiki.tada.se/index.php?title=PLJava_License
+ * All rights reserved. This program and the accompanying materials
+ * are made available under the terms of the The BSD 3-Clause License
+ * which accompanies this distribution, and is available at
+ * http://opensource.org/licenses/BSD-3-Clause
  *
- * @author Thomas Hallgren
+ * Contributors:
+ *   Tada AB
+ *   PostgreSQL Global Development Group
+ *   Chapman Flack
  */
 #include "pljava/type/Type_priv.h"
 #include "pljava/type/Array.h"
@@ -14,7 +17,6 @@
 
 static TypeClass s_floatClass;
 static jclass    s_Float_class;
-static jclass    s_FloatArray_class;
 static jmethodID s_Float_init;
 static jmethodID s_Float_floatValue;
 
@@ -29,9 +31,9 @@ static Datum _asDatum(jfloat v)
 	return ret;
 }
 
-static Datum _float_invoke(Type self, jclass cls, jmethodID method, jvalue* args, PG_FUNCTION_ARGS)
+static Datum _float_invoke(Type self, Function fn, PG_FUNCTION_ARGS)
 {
-	return _asDatum(JNI_callStaticFloatMethodA(cls, method, args));
+	return _asDatum(pljava_Function_floatInvoke(fn));
 }
 
 static jvalue _float_coerceDatum(Type self, Datum arg)
@@ -82,20 +84,8 @@ static Datum _floatArray_coerceObject(Type self, jobject floatArray)
 
 	v = createArrayType(nElems, sizeof(jfloat), FLOAT4OID, false);
 
-	if(!JNI_isInstanceOf( floatArray, s_FloatArray_class))
-		JNI_getFloatArrayRegion((jfloatArray)floatArray, 0,
+	JNI_getFloatArrayRegion((jfloatArray)floatArray, 0,
 					  nElems, (jfloat*)ARR_DATA_PTR(v));
-	else
-	{
-		int idx = 0;
-		jfloat *array = (jfloat*)ARR_DATA_PTR(v);
-
-		for(idx = 0; idx < nElems; ++idx)
-		{
-			array[idx] = JNI_callFloatMethod(JNI_getObjectArrayElement(floatArray, idx),
-							   s_Float_floatValue);
-		}
-	}
 
 	PG_RETURN_ARRAYTYPE_P(v);
 }
@@ -136,7 +126,6 @@ void Float_initialize(void)
 	TypeClass cls;
 
 	s_Float_class = JNI_newGlobalRef(PgObject_getJavaClass("java/lang/Float"));
-	s_FloatArray_class = JNI_newGlobalRef(PgObject_getJavaClass("[Ljava/lang/Float;"));
 	s_Float_init = PgObject_getJavaMethod(s_Float_class, "<init>", "(F)V");
 	s_Float_floatValue = PgObject_getJavaMethod(s_Float_class, "floatValue", "()F");
 
