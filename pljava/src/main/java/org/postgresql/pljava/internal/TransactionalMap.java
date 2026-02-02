@@ -1,8 +1,14 @@
 /*
- * Copyright (c) 2004, 2005, 2006 TADA AB - Taby Sweden
- * Distributed under the terms shown in the file COPYRIGHT
- * found in the root folder of this project or at
- * http://eng.tada.se/osprojects/COPYRIGHT.html
+ * Copyright (c) 2004-2020 Tada AB and other contributors, as listed below.
+ *
+ * All rights reserved. This program and the accompanying materials
+ * are made available under the terms of the The BSD 3-Clause License
+ * which accompanies this distribution, and is available at
+ * http://opensource.org/licenses/BSD-3-Clause
+ *
+ * Contributors:
+ *   Thomas Hallgren
+ *   Chapman Flack
  */
 package org.postgresql.pljava.internal;
 
@@ -15,6 +21,12 @@ import java.util.AbstractSet;
 import java.util.AbstractCollection;
 import java.util.NoSuchElementException;
 
+/*
+ * The smallest quantum of reason for adding an import: to avoid a javadoc error
+ * in a deprecation note.
+ */
+import org.postgresql.pljava.TransactionListener;
+
 /**
  * A TransactionalMap acts as a modifiable front for a backing map. All
  * modifications can be reverted by a call to abort or propagated to
@@ -23,8 +35,17 @@ import java.util.NoSuchElementException;
  * The map is not synchronized so care should be taken if multiple threads
  * will access the map.
  *
+ * @deprecated This class (a) isn't exposed in {@code pljava-api}, (b) is only
+ * used to implement the once-transactional attribute map in {@code Session},
+ * and (c) hasn't had transactional behavior even there, since 3ab90e5
+ * (November 2005). Future code needing any kind of store sync'd to PostgreSQL
+ * transactions should implement that behavior with Java's ordinary tools, using
+ * a {@link TransactionListener} to be kept in sync with transactions. 
+ *
  * @author Thomas Hallgren
  */
+@Deprecated(since="1.5.3", forRemoval=true)
+@SuppressWarnings("unchecked") // fix warnings in a deprecated class? no thanks.
 public class TransactionalMap extends HashMap
 {
 	private static final long serialVersionUID = 5337569423915578121L;

@@ -1,10 +1,14 @@
 /*
- * Copyright (c) 2004, 2005, 2006 TADA AB - Taby Sweden
- * Distributed under the terms shown in the file COPYRIGHT
- * found in the root folder of this project or at
- * http://eng.tada.se/osprojects/COPYRIGHT.html
+ * Copyright (c) 2004-2025 Tada AB and other contributors, as listed below.
  *
- * @author Thomas Hallgren
+ * All rights reserved. This program and the accompanying materials
+ * are made available under the terms of the The BSD 3-Clause License
+ * which accompanies this distribution, and is available at
+ * http://opensource.org/licenses/BSD-3-Clause
+ *
+ * Contributors:
+ *   Tada AB
+ *   Chapman Flack
  */
 #include <postgres.h>
 #include <funcapi.h>
@@ -13,7 +17,7 @@
 #include "pljava/type/Type_priv.h"
 #include "pljava/type/Composite.h"
 #include "pljava/type/TupleDesc.h"
-#include "pljava/type/HeapTupleHeader.h"
+#include "pljava/type/SingleRowReader.h"
 #include "pljava/Invocation.h"
 #include "org_postgresql_pljava_jdbc_SingleRowReader.h"
 
@@ -45,9 +49,6 @@ static jclass s_ResultSetHandle_class;
 static jclass s_ResultSetPicker_class;
 static jmethodID s_ResultSetPicker_init;
 
-static jclass s_SingleRowReader_class;
-static jmethodID s_SingleRowReader_init;
-
 static jclass s_SingleRowWriter_class;
 static jmethodID s_SingleRowWriter_init;
 static jmethodID s_SingleRowWriter_getTupleAndClear;
@@ -61,13 +62,11 @@ static jobject _createWriter(jobject tupleDesc)
 
 static HeapTuple _getTupleAndClear(jobject jrps)
 {
-	Ptr2Long p2l;
-
 	if(jrps == 0)
 		return 0;
 
-	p2l.longVal = JNI_callLongMethod(jrps, s_SingleRowWriter_getTupleAndClear);
-	return (HeapTuple)p2l.ptrVal;
+	return JLongGet(HeapTuple,
+		 JNI_callLongMethod(jrps, s_SingleRowWriter_getTupleAndClear));
 }
 
 /*
@@ -78,19 +77,21 @@ static HeapTuple _getTupleAndClear(jobject jrps)
  * true. If so, the values are obtained in the form of a HeapTuple which in
  * turn is returned (as a Datum) from this method.
  */
-static Datum _Composite_invoke(Type self, jclass cls, jmethodID method, jvalue* args, PG_FUNCTION_ARGS)
+static Datum _Composite_invoke(Type self, Function fn, PG_FUNCTION_ARGS)
 {
 	bool hasRow;
 	Datum result = 0;
 	TupleDesc tupleDesc = Type_getTupleDesc(self, fcinfo);
-	jobject jtd = TupleDesc_create(tupleDesc);
-	jobject singleRowWriter = _createWriter(jtd);
-	int numArgs = fcinfo->nargs;
+	jobject jtd = pljava_TupleDesc_create(tupleDesc);
+	jvalue singleRowWriter;
+	singleRowWriter.l = _createWriter(jtd);
+	/*
+	 * Caller guarantees room for one extra reference parameter, so it will go
+	 * at index (length - 1).
+	 */
+	pljava_Function_setParameter(fn, -1, singleRowWriter);
 	
-	// Caller guarantees room for one extra slot
-	//
-	args[numArgs].l = singleRowWriter;
-	hasRow = (JNI_callStaticBooleanMethodA(cls, method, args) == JNI_TRUE);
+	hasRow = (pljava_Function_booleanInvoke(fn) == JNI_TRUE);
 
 	if(hasRow)
 	{
@@ -98,7 +99,7 @@ static Datum _Composite_invoke(Type self, jclass cls, jmethodID method, jvalue* 
 		 * durable context.
 		 */
 		MemoryContext currCtx = Invocation_switchToUpperContext();
-		HeapTuple tuple = _getTupleAndClear(singleRowWriter);
+		HeapTuple tuple = _getTupleAndClear(singleRowWriter.l);
 	    result = HeapTupleGetDatum(tuple);
 		MemoryContextSwitchTo(currCtx);
 	}
@@ -106,20 +107,8 @@ static Datum _Composite_invoke(Type self, jclass cls, jmethodID method, jvalue* 
 		fcinfo->isnull = true;
 
 	JNI_deleteLocalRef(jtd);
-	JNI_deleteLocalRef(singleRowWriter);
+	JNI_deleteLocalRef(singleRowWriter.l);
 	return result;
-}
-
-static jobject _Composite_getSRFProducer(Type self, jclass cls, jmethodID method, jvalue* args)
-{
-	jobject tmp = JNI_callStaticObjectMethodA(cls, method, args);
-	if(tmp != 0 && JNI_isInstanceOf(tmp, s_ResultSetHandle_class))
-	{
-		jobject wrapper = JNI_newObject(s_ResultSetPicker_class, s_ResultSetPicker_init, tmp);
-		JNI_deleteLocalRef(tmp);
-		tmp = wrapper;
-	}
-	return tmp;
 }
 
 static jobject _Composite_getSRFCollector(Type self, PG_FUNCTION_ARGS)
@@ -130,24 +119,14 @@ static jobject _Composite_getSRFCollector(Type self, PG_FUNCTION_ARGS)
 	if(tupleDesc == 0)
 		ereport(ERROR, (errmsg("Unable to find tuple descriptor")));
 
-	tmp1 = TupleDesc_create(tupleDesc);
+	tmp1 = pljava_TupleDesc_create(tupleDesc);
 	tmp2 = _createWriter(tmp1);
 	JNI_deleteLocalRef(tmp1);
 	return tmp2;
 }
 
-static bool _Composite_hasNextSRF(Type self, jobject rowProducer, jobject rowCollector, jint callCounter)
-{
-	/* Obtain next row using the RowCollector as a parameter to the
-	 * ResultSetProvider.assignRowValues method.
-	 */
-	return (JNI_callBooleanMethod(rowProducer,
-			s_ResultSetProvider_assignRowValues,
-			rowCollector,
-			callCounter) == JNI_TRUE);
-}
-
-static Datum _Composite_nextSRF(Type self, jobject rowProducer, jobject rowCollector)
+static Datum _Composite_datumFromSRF(
+	Type self, jobject row, jobject rowCollector)
 {
 	Datum result = 0;
 	HeapTuple tuple = _getTupleAndClear(rowCollector);
@@ -156,29 +135,19 @@ static Datum _Composite_nextSRF(Type self, jobject rowProducer, jobject rowColle
 	return result;
 }
 
-static void _Composite_closeSRF(Type self, jobject rowProducer)
-{
-	JNI_callVoidMethod(rowProducer, s_ResultSetProvider_close);
-}
-
 /* Assume that the Datum is a HeapTupleHeader and convert it into
  * a SingleRowReader instance.
  */
 static jvalue _Composite_coerceDatum(Type self, Datum arg)
 {
-	jobject tupleDesc;
 	jvalue result;
-	jlong pointer;
 	HeapTupleHeader hth = DatumGetHeapTupleHeader(arg);
 
 	result.l = 0;
 	if(hth == 0)
 		return result;
 
-	tupleDesc = HeapTupleHeader_getTupleDesc(hth);
-	pointer = Invocation_createLocalWrapper(hth);
-	result.l = JNI_newObject(s_SingleRowReader_class, s_SingleRowReader_init, pointer, tupleDesc);
-	JNI_deleteLocalRef(tupleDesc);
+	result.l = pljava_SingleRowReader_create(hth);
 	return result;
 }
 
@@ -229,15 +198,6 @@ static TupleDesc _Composite_getTupleDesc(Type self, PG_FUNCTION_ARGS)
 	return td;
 }
 
-static const char* _Composite_getJNIReturnSignature(Type self, bool forMultiCall, bool useAltRepr)
-{
-	return forMultiCall
-		? (useAltRepr
-			? "Lorg/postgresql/pljava/ResultSetHandle;"
-			: "Lorg/postgresql/pljava/ResultSetProvider;")
-		: "Z";
-}
-
 Type Composite_obtain(Oid typeId)
 {
 	Composite infant = (Composite)TypeClass_allocInstance(s_CompositeClass, typeId);
@@ -257,25 +217,6 @@ Type Composite_obtain(Oid typeId)
 extern void Composite_initialize(void);
 void Composite_initialize(void)
 {
-	JNINativeMethod methods[] =
-	{
-		{
-		"_getObject",
-	  	"(JJI)Ljava/lang/Object;",
-	  	Java_org_postgresql_pljava_jdbc_SingleRowReader__1getObject
-		},
-		{
-		"_free",
-		"(J)V",
-		Java_org_postgresql_pljava_jdbc_SingleRowReader__1free
-		},
-		{ 0, 0, 0 }
-	};
-
-	s_SingleRowReader_class = JNI_newGlobalRef(PgObject_getJavaClass("org/postgresql/pljava/jdbc/SingleRowReader"));
-	PgObject_registerNatives2(s_SingleRowReader_class, methods);
-	s_SingleRowReader_init = PgObject_getJavaMethod(s_SingleRowReader_class, "<init>", "(JLorg/postgresql/pljava/internal/TupleDesc;)V");
-
 	s_SingleRowWriter_class = JNI_newGlobalRef(PgObject_getJavaClass("org/postgresql/pljava/jdbc/SingleRowWriter"));
 	s_SingleRowWriter_init = PgObject_getJavaMethod(s_SingleRowWriter_class, "<init>", "(Lorg/postgresql/pljava/internal/TupleDesc;)V");
 	s_SingleRowWriter_getTupleAndClear = PgObject_getJavaMethod(s_SingleRowWriter_class, "getTupleAndClear", "()J");
@@ -294,39 +235,9 @@ void Composite_initialize(void)
 	s_CompositeClass->getTupleDesc    = _Composite_getTupleDesc;
 	s_CompositeClass->coerceDatum     = _Composite_coerceDatum;
 	s_CompositeClass->invoke          = _Composite_invoke;
-	s_CompositeClass->getSRFProducer  = _Composite_getSRFProducer;
 	s_CompositeClass->getSRFCollector = _Composite_getSRFCollector;
-	s_CompositeClass->hasNextSRF      = _Composite_hasNextSRF;
-	s_CompositeClass->nextSRF         = _Composite_nextSRF;
-	s_CompositeClass->closeSRF        = _Composite_closeSRF;
-	s_CompositeClass->getJNIReturnSignature = _Composite_getJNIReturnSignature;
+	s_CompositeClass->datumFromSRF    = _Composite_datumFromSRF;
 	s_CompositeClass->outParameter    = true;
 
 	Type_registerType2(InvalidOid, "java.sql.ResultSet", Composite_obtain);
-}
-
-/****************************************
- * JNI methods
- ****************************************/
-
-/*
- * Class:     org_postgresql_pljava_jdbc_SingleRowReader
- * Method:    _free
- * Signature: (J)V
- */
-JNIEXPORT void JNICALL
-Java_org_postgresql_pljava_jdbc_SingleRowReader__1free(JNIEnv* env, jobject _this, jlong hth)
-{
-	HeapTupleHeader_free(env, hth);
-}
-
-/*
- * Class:     org_postgresql_pljava_jdbc_SingleRowReader
- * Method:    _getObject
- * Signature: (JJI)Ljava/lang/Object;
- */
-JNIEXPORT jobject JNICALL
-Java_org_postgresql_pljava_jdbc_SingleRowReader__1getObject(JNIEnv* env, jclass clazz, jlong hth, jlong jtd, jint attrNo)
-{
-	return HeapTupleHeader_getObject(env, hth, jtd, attrNo);
 }

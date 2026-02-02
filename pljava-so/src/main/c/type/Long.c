@@ -1,12 +1,15 @@
 /*
- * Copyright (c) 2004, 2005, 2006 TADA AB - Taby Sweden
- * Copyright (c) 2010, 2011 PostgreSQL Global Development Group
+ * Copyright (c) 2004-2020 Tada AB and other contributors, as listed below.
  *
- * Distributed under the terms shown in the file COPYRIGHT
- * found in the root folder of this project or at
- * http://wiki.tada.se/index.php?title=PLJava_License
+ * All rights reserved. This program and the accompanying materials
+ * are made available under the terms of the The BSD 3-Clause License
+ * which accompanies this distribution, and is available at
+ * http://opensource.org/licenses/BSD-3-Clause
  *
- * @author Thomas Hallgren
+ * Contributors:
+ *   Tada AB
+ *   PostgreSQL Global Development Group
+ *   Chapman Flack
  */
 #include "pljava/type/Type_priv.h"
 #include "pljava/type/Array.h"
@@ -14,7 +17,6 @@
 
 static TypeClass s_longClass;
 static jclass    s_Long_class;
-static jclass    s_LongArray_class;
 static jmethodID s_Long_init;
 static jmethodID s_Long_longValue;
 
@@ -29,9 +31,9 @@ static Datum _asDatum(jlong v)
 	return ret;
 }
 
-static Datum _long_invoke(Type self, jclass cls, jmethodID method, jvalue* args, PG_FUNCTION_ARGS)
+static Datum _long_invoke(Type self, Function fn, PG_FUNCTION_ARGS)
 {
-	return _asDatum(JNI_callStaticLongMethodA(cls, method, args));
+	return _asDatum(pljava_Function_longInvoke(fn));
 }
 
 static jvalue _long_coerceDatum(Type self, Datum arg)
@@ -82,19 +84,8 @@ static Datum _longArray_coerceObject(Type self, jobject longArray)
 
 	v = createArrayType(nElems, sizeof(jlong), INT8OID, false);
 
-	if(!JNI_isInstanceOf( longArray, s_LongArray_class))
-		JNI_getLongArrayRegion((jlongArray)longArray, 0, nElems, (jlong*)ARR_DATA_PTR(v));
-	else
-	{
-		int idx = 0;
-		jlong *array = (jlong*)ARR_DATA_PTR(v);
-
-		for(idx = 0; idx < nElems; ++idx)
-		{
-			array[idx] = JNI_callLongMethod(JNI_getObjectArrayElement(longArray, idx),
-							s_Long_longValue);
-		}
-	}
+	JNI_getLongArrayRegion(
+			(jlongArray)longArray, 0, nElems, (jlong*)ARR_DATA_PTR(v));
 
 	PG_RETURN_ARRAYTYPE_P(v);
 }
@@ -135,7 +126,6 @@ void Long_initialize(void)
 	TypeClass cls;
 
 	s_Long_class = JNI_newGlobalRef(PgObject_getJavaClass("java/lang/Long"));
-	s_LongArray_class = JNI_newGlobalRef(PgObject_getJavaClass("[Ljava/lang/Long;"));
 	s_Long_init = PgObject_getJavaMethod(s_Long_class, "<init>", "(J)V");
 	s_Long_longValue = PgObject_getJavaMethod(s_Long_class, "longValue", "()J");
 

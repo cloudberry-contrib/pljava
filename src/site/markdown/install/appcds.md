@@ -1,21 +1,30 @@
-# How to set up application class data sharing
+# How to set up application class data sharing in Hotspot
 
-[Application class data sharing][appcds] is a feature, currently unique
-to the Oracle JVM (8u40 and later) that extends the ordinary Java class
-data sharing feature to also include selected classes from the application
-class path. In PL/Java terms, that means that not only Java's own internal
-classes, but PL/Java's also, can be saved in a preprocessed shared archive
-and quickly mapped when any backend starts PL/Java. For an overview, see
+For the Hotspot JVM, [Application class data sharing][appcds] is a feature,
+first released in the Oracle JVM (8u40 and later) that extends the ordinary
+Java class data sharing feature to also include selected classes from the
+application class path. In PL/Java terms, that means that not only Java's own
+internal classes, but PL/Java's also, can be saved in a preprocessed shared
+archive and quickly mapped when any backend starts PL/Java. For an overview, see
 the [PL/Java VM options page][vmop].
+
+Starting with Java 10, the feature is also available in
+[OpenJDK with Hotspot][OpenJDK]. From Java 8 onward, a different feature
+with the same effect is available in [OpenJDK with OpenJ9][OpenJDK]; that
+feature is covered [on its own page][cdsJ9].
 
 [appcds]: http://docs.oracle.com/javase/8/docs/technotes/tools/unix/java.html#app_class_data_sharing
 [vmop]: vmoptions.html
 [bcl]: http://www.oracle.com/technetwork/java/javase/terms/license/index.html
+[OpenJDK]: https://adoptopenjdk.net/
+[cdsJ9]: oj9vmopt.html#How_to_set_up_class_sharing_in_OpenJ9
+[o]: https://blogs.oracle.com/java-platform-group/oracle-jdk-releases-for-java-11-and-later
+[dcdsa]: https://docs.oracle.com/en/java/javase/13/docs/specs/man/java.html#dynamic-cds-archive
 
 ## License considerations
 
-For Java 8, application class data sharing is a "commercial feature" in
-Oracle's JVM, and will not work unless `pljava.vmoptions` also contain
+In Oracle Java, application class data sharing was a "commercial feature" first
+released in Java 8, not usable unless `pljava.vmoptions` also include
 `-XX:+UnlockCommercialFeatures` , with implications described in the
 "supplemental license terms" of the Oracle
 [binary code license for Java SE][bcl]. The license seems
@@ -25,14 +34,47 @@ negotiating an additional agreement with Oracle if the feature will be used
 purpose." It is available to consider for any application where the
 additional performance margin can be given a price.
 
-Looking ahead, in the source for OpenJDK 9 (`share/vm/runtime/globals.hpp`)
-are promising signs that equivalent functionality will be available there.
+The same feature in OpenJDK with Hotspot is available from Java 10 onward,
+and does not require any additional license or `-XX:+UnlockCommercialFeatures`
+option.
 
-## Setup
+Starting in Java 11, Oracle offers
+[Oracle-branded downloads of both "Oracle JDK" and "Oracle's OpenJDK builds"][o]
+that are "functionally identical aside from some cosmetic and packaging
+differences". "Oracle's OpenJDK builds" may be used for production or
+commercial purposes with no additional licensing, while any such use of
+"Oracle JDK" requires a commercial license. The application class data sharing
+feature is available in both, and no longer requires the
+`-XX:+UnlockCommercialFeatures` option in either case (not in
+"Oracle's OpenJDK builds" because their use is unrestricted, and not in
+"Oracle JDK" because the "commercial feature" is now, effectively, the entire
+JDK).
+
+The equivalent feature in OpenJDK with OpenJ9,
+[described separately][cdsJ9], is available from Java 8 onward, also with no
+additional license or setup needed.
+
+## Setup for Hotspot, earlier than Java 13
+
+The setup instructions on this page are for Hotspot, whether in Oracle Java
+or OpenJDK with Hotspot. The two differ only in that, wherever an
+`-XX:+UnlockCommercialFeatures` option is shown in the steps below,
+**it is needed in Oracle Java 8, 9, or 10, but not in OpenJDK/Hotspot, or
+Oracle JDK 11 or later**.
+
+The Java version also affects the `-XX:+UseAppCDS` option shown below.
+For Java 8 through 10, the option must be used for application class data
+sharing to be enabled. In Java 11, the feature is enabled by default (though
+the shared archive must still be created as described here), and the
+`-XX:+UseAppCDS` option is no longer necessary; it will be accepted but
+ignored with a warning. **In Java 12 and later, `-XX:+UseAppCDS` is not
+needed and will be rejected as unrecognized, making PL/Java fail to load.**
 
 Setting up PL/Java to use application class data sharing is a three-step
 process. Each step is done by setting a different combination of options
-in `pljava.vmoptions`. These are the three steps in overview:
+in `pljava.vmoptions`. A slightly different procedure, described further
+below, appears in Java 13. Up through Java 12, these are the three steps
+in overview:
 
 1. Make a list of classes to be preloaded, by saving the names of classes
     that are loaded while executing some desired code in PL/Java.
@@ -60,7 +102,7 @@ final `pljava.vmoptions` setting at the end.
 Classes eligible to go in the shared archive are the Java system classes
 (including anything in the deprecated `java.ext.dirs` or `java.endorsed.dirs`
 directories), classes in the PL/Java jar itself, and any others in jars named in
-`pljava.classpath`. Classes from PL/Java application jars loaded into the
+`pljava.module_path`. Classes from PL/Java application jars loaded into the
 database normally with `sqlj.install_jar` are not candidates for the shared
 archive. The feature will speed the startup of PL/Java itself, but application
 classes are still loaded from the database in PL/Java's usual way.
@@ -144,7 +186,7 @@ VM options you may have chosen to set.
 
 ```
 =# SET pljava.vmoptions TO
--#  '-XX:+UnlockCommercialFeatures -XX:+UseAppCDS -Xshare:on '
+-#  '-XX:+UnlockCommercialFeatures -XX:+UseAppCDS -Xshare:auto '
 -#  '-XX:SharedArchiveFile=/usr/pgsql/lib/pljava.jsa';
 SET
 =# SELECT sqlj.get_classpath('public'); -- just checking it works
@@ -158,6 +200,32 @@ SET
 
 Alternatively, use `ALTER SYSTEM` (or edit the `postgresql.conf` file)
 to save the setting for all databases in the cluster.
+
+The use of `-Xshare:auto` rather than `-Xshare:on` in the final production
+settings may be surprising, but is recommended. On operating systems with
+address-space layout randomization, it is possible for some backends to
+(randomly) fail to map the shared archive. With `-Xshare:auto`, they will
+simply proceed without sharing and with higher resource usage, which may not
+be ideal, but the same event with `-Xshare:on` would be a hard failure.
+
+## Setup for Hotspot, as of Java 13
+
+Java 13 introduces a [dynamic CDS archive][dcdsa] feature, with fewer steps
+to generate a usable archive. In essence, it combines the first two earlier
+steps (generate a list of loaded classes from a sample run, then generate
+an archive from the list) into a single step: do a sample run with the
+option `-XX:ArchiveClassesAtExit=/tmp/pljava.jsa` and the archive will be
+written to the named file when the backend exits.
+
+Then, as in the earlier procedure, move the archive file to a more permanent
+and less writable location, and name it with `-XX:SharedArchiveFile=` in the
+production `pljava.vmoptions` settings. That is the only option needed to
+enable application class data sharing as of Java 13, as `-Xshare:auto` is
+the default, and the earlier `-XX:+UnlockCommercialFeatures` and
+`-XX:+UseAppCDS` options are obsolete.
+
+The [dynamic CDS archive documentation][dcdsa] covers the setup in useful
+detail.
 
 ## Java libraries
 

@@ -1,8 +1,14 @@
 /*
- * Copyright (c) 2004, 2005, 2006 TADA AB - Taby Sweden
- * Distributed under the terms shown in the file COPYRIGHT
- * found in the root folder of this project or at
- * http://eng.tada.se/osprojects/COPYRIGHT.html
+ * Copyright (c) 2004-2021 Tada AB and other contributors, as listed below.
+ *
+ * All rights reserved. This program and the accompanying materials
+ * are made available under the terms of the The BSD 3-Clause License
+ * which accompanies this distribution, and is available at
+ * http://opensource.org/licenses/BSD-3-Clause
+ *
+ * Contributors:
+ *   Tada AB
+ *   Chapman Flack
  *
  * @author Thomas Hallgren
  */
@@ -21,14 +27,113 @@
 JNIEnv* jniEnv;
 jint (JNICALL *pljava_createvm)(JavaVM **, void **, void *);
 
+void* mainThreadId; /* declared in pljava.h */
+
+static JNIEnv* primordialJNIEnv;
+
 static jobject s_threadLock;
 
+static bool s_refuseOtherThreads = false;
+static bool s_doMonitorOps = true;
+
+static jclass    s_Thread_class;
+static jmethodID s_Thread_currentThread;
+static jfieldID  s_Thread_contextLoader;
+
+static jobject   s_threadObject;
+
+void pljava_JNI_setThreadPolicy(bool refuseOtherThreads, bool doMonitorOps)
+{
+	s_refuseOtherThreads = refuseOtherThreads;
+	s_doMonitorOps = doMonitorOps;
+}
+
+/*
+ * This file contains very specialized methods for updating the context
+ * class loader of a thread, because this is where they can be implemented
+ * without the overhead of several calls to wrappers defined here.
+ *
+ * More lightweight implementations of those can be chosen if the selected
+ * thread policy precludes native access from any but the primordial thread.
+ */
+JNI_ContextLoaderUpdater  *JNI_loaderUpdater;
+JNI_ContextLoaderRestorer *JNI_loaderRestorer;
+
+static JNI_ContextLoaderUpdater  _noopUpdater;
+static JNI_ContextLoaderRestorer _noopRestorer;
+
+static JNI_ContextLoaderUpdater  _lightUpdater;
+static JNI_ContextLoaderRestorer _lightRestorer;
+
+static JNI_ContextLoaderUpdater  _heavyUpdater;
+static JNI_ContextLoaderRestorer _heavyRestorer;
+
+void pljava_JNI_threadInitialize(bool manageLoader)
+{
+	if ( ! manageLoader )
+	{
+		JNI_loaderUpdater  = _noopUpdater;
+		JNI_loaderRestorer = _noopRestorer;
+		return;
+	}
+
+	s_Thread_class = JNI_newGlobalRef(PgObject_getJavaClass(
+		"java/lang/Thread"));
+	s_Thread_currentThread = PgObject_getStaticJavaMethod(
+		s_Thread_class,
+		"currentThread",
+		"()"
+		"Ljava/lang/Thread;");
+	s_Thread_contextLoader = JNI_getFieldIDOrNull(s_Thread_class,
+		"contextClassLoader", "Ljava/lang/ClassLoader;");
+
+	if ( NULL == s_Thread_contextLoader )
+	{
+		ereport(WARNING, (
+			errmsg("unable to manage thread context classloaders in this JVM")
+		));
+		JNI_loaderUpdater  = _noopUpdater;
+		JNI_loaderRestorer = _noopRestorer;
+	}
+	else if ( s_refuseOtherThreads  ||  ! s_doMonitorOps )
+	{
+		s_threadObject =
+			JNI_newGlobalRef(
+				JNI_callStaticObjectMethod(
+					s_Thread_class, s_Thread_currentThread));
+		JNI_loaderUpdater  = _lightUpdater;
+		JNI_loaderRestorer = _lightRestorer;
+	}
+	else
+	{
+		JNI_loaderUpdater  = _heavyUpdater;
+		JNI_loaderRestorer = _heavyRestorer;
+	}
+}
+
+
+/*
+ * BEGIN_JAVA and END_JAVA are used in JNI wrappers that are not expected to
+ * invoke Java methods; all they do is play the game with the scope of the JNI
+ * env value that was devised to fail fast if the intended pattern for PL/Java's
+ * JNI usage isn't followed.
+ *
+ * BEGIN_CALL and END_CALL add to that the releasing of the "THREADLOCK"
+ * monitor when calling into Java, and reacquiring it on return, that support
+ * the java_thread_pg_entry=allow mode of operation, and also checking for
+ * exceptions and turning them into PostgreSQL ereports.
+ *
+ * The _MONITOR_HELD flavors of those skip the monitor operations but still do
+ * the exception checks. They are used in a select few *Locked flavors of
+ * method call wrappers used where only known and lightweight Java methods will
+ * be invoked and not arbitrary methods of user code.
+ */
 #define BEGIN_JAVA { JNIEnv* env = jniEnv; jniEnv = 0;
 #define END_JAVA jniEnv = env; }
 
 #define BEGIN_CALL \
 	BEGIN_JAVA \
-	if((*env)->MonitorExit(env, s_threadLock) < 0) \
+	if(s_doMonitorOps && ((*env)->MonitorExit(env, s_threadLock) < 0)) \
 		elog(ERROR, "Java exit monitor failure");
 
 #define END_CALL endCall(env); }
@@ -42,18 +147,34 @@ static void elogExceptionMessage(JNIEnv* env, jthrowable exh, int logLevel)
 {
 	StringInfoData buf;
 	int sqlState = ERRCODE_INTERNAL_ERROR;
-	jclass exhClass = (*env)->GetObjectClass(env, exh);
-	jstring jtmp = (jstring)(*env)->CallObjectMethod(env, exhClass, Class_getName);
 	JNIEnv* saveEnv = jniEnv;
+	jclass exhClass = (*env)->GetObjectClass(env, exh);
+	jstring jtmp =
+		(jstring)(*env)->CallObjectMethod(env, exhClass, Class_getName);
+	/* ExceptionOccurred check is found below ... */
 
 	initStringInfo(&buf);
 
 	jniEnv = env; /* Used by the String operations */
-	String_appendJavaString(&buf, jtmp);
+
+	if ( 0 == (*env)->ExceptionOccurred(env) ) /* ... here */
+		String_appendJavaString(&buf, jtmp);
+	else
+	{
+		(*env)->ExceptionClear(env);
+		appendStringInfoString(&buf, "<unknown Java class>");
+	}
+
 	(*env)->DeleteLocalRef(env, exhClass);
 	(*env)->DeleteLocalRef(env, jtmp);
 
 	jtmp = (jstring)(*env)->CallObjectMethod(env, exh, Throwable_getMessage);
+	if ( 0 != (*env)->ExceptionOccurred(env) )
+	{
+		(*env)->ExceptionClear(env);
+		jtmp = 0;
+	}
+
 	if(jtmp != 0)
 	{
 		appendStringInfoString(&buf, ": ");
@@ -64,6 +185,12 @@ static void elogExceptionMessage(JNIEnv* env, jthrowable exh, int logLevel)
 	if((*env)->IsInstanceOf(env, exh, SQLException_class))
 	{
 		jtmp = (*env)->CallObjectMethod(env, exh, SQLException_getSQLState);
+		if ( 0 != (*env)->ExceptionOccurred(env) )
+		{
+			(*env)->ExceptionClear(env);
+			jtmp = 0;
+		}
+
 		if(jtmp != 0)
 		{
 			char* s = String_createNTS(jtmp);
@@ -78,10 +205,13 @@ static void elogExceptionMessage(JNIEnv* env, jthrowable exh, int logLevel)
 	ereport(logLevel, (errcode(sqlState), errmsg("%s", buf.data)));
 }
 
-static void printStacktrace(JNIEnv* env, jobject exh)
+static void printStacktrace(JNIEnv* env, jobject exh, int elevel)
 {
-#ifndef _MSC_VER
-	if(DEBUG1 >= log_min_messages || DEBUG1 >= client_min_messages)
+#if 100002<=PG_VERSION_NUM || \
+	 90607<=PG_VERSION_NUM && PG_VERSION_NUM<100000 || \
+	 90511<=PG_VERSION_NUM && PG_VERSION_NUM< 90600 || \
+	! defined(_MSC_VER)
+	if(elevel >= log_min_messages || elevel >= client_min_messages)
 #else
 	/* This is gross, but only happens as often as an exception escapes Java
 	 * code to be rethrown. There is some renewed interest on pgsql-hackers to
@@ -92,8 +222,9 @@ static void printStacktrace(JNIEnv* env, jobject exh)
 		|| 0 == strncmp("debug", PG_GETCONFIGOPTION("client_min_messages"), 5) )
 #endif
 	{
-		int currLevel = Backend_setJavaLogLevel(DEBUG1);
+		int currLevel = Backend_setJavaLogLevel(elevel);
 		(*env)->CallVoidMethod(env, exh, Throwable_printStackTrace);
+		(*env)->ExceptionOccurred(env); /* sop for JNI exception-check check */
 		Backend_setJavaLogLevel(currLevel);
 	}
 }
@@ -104,20 +235,26 @@ static void endCall(JNIEnv* env)
 	if(exh != 0)
 		(*env)->ExceptionClear(env);
 
-	if((*env)->MonitorEnter(env, s_threadLock) < 0)
+	if(s_doMonitorOps && ((*env)->MonitorEnter(env, s_threadLock) < 0))
 		elog(ERROR, "Java enter monitor failure");
 
 	jniEnv = env;
 	if(exh != 0)
 	{
-		printStacktrace(env, exh);
+		printStacktrace(env, exh, DEBUG1);
 		if((*env)->IsInstanceOf(env, exh, ServerException_class))
 		{
 			/* Rethrow the server error.
 			 */
 			jobject jed = (*env)->CallObjectMethod(env, exh, ServerException_getErrorData);
+			if ( 0 != (*env)->ExceptionOccurred(env) )
+			{
+				(*env)->ExceptionClear(env);
+				jed = 0;
+			}
+
 			if(jed != 0)
-				ReThrowError(ErrorData_getErrorData(jed));
+				ReThrowError(pljava_ErrorData_getErrorData(jed));
 		}
 		/* There's no return from this call.
 		 */
@@ -134,14 +271,20 @@ static void endCallMonitorHeld(JNIEnv* env)
 	jniEnv = env;
 	if(exh != 0)
 	{
-		printStacktrace(env, exh);
+		printStacktrace(env, exh, DEBUG1);
 		if((*env)->IsInstanceOf(env, exh, ServerException_class))
 		{
 			/* Rethrow the server error.
 			 */
 			jobject jed = (*env)->CallObjectMethod(env, exh, ServerException_getErrorData);
+			if ( 0 != (*env)->ExceptionOccurred(env) )
+			{
+				(*env)->ExceptionClear(env);
+				jed = 0;
+			}
+
 			if(jed != 0)
-				ReThrowError(ErrorData_getErrorData(jed));
+				ReThrowError(pljava_ErrorData_getErrorData(jed));
 		}
 		/* There's no return from this call.
 		 */
@@ -151,6 +294,15 @@ static void endCallMonitorHeld(JNIEnv* env)
 
 bool beginNativeNoErrCheck(JNIEnv* env)
 {
+	if ( s_refuseOtherThreads  &&  env != primordialJNIEnv )
+	{
+		env = JNI_setEnv(env);
+		Exception_throw(ERRCODE_INTERNAL_ERROR,
+			"Attempt by non-initial thread to enter PostgreSQL from Java");
+		JNI_setEnv(env);
+		return false;
+	}
+
 	if((env = JNI_setEnv(env)) != 0)
 	{
 		/* The backend is *not* awaiting the return of a call to the JVM
@@ -175,15 +327,14 @@ bool beginNative(JNIEnv* env)
 		return false;
 	}
 
-	if(currentInvocation->errorOccured)
+	if(currentInvocation->errorOccurred)
 	{
 		/* An elog with level higher than ERROR was issued. The transaction
 		 * state is unknown. There's no way the JVM is allowed to enter the
 		 * backend at this point.
 		 */
 		env = JNI_setEnv(env);
-		Exception_throw(ERRCODE_INTERNAL_ERROR,
-			"An attempt was made to call a PostgreSQL backend function after an elog(ERROR) had been issued");
+		Exception_throw_unhandled();
 		JNI_setEnv(env);
 		return false;
 	}
@@ -323,6 +474,25 @@ jlong JNI_callLongMethodV(jobject object, jmethodID methodID, va_list args)
 	return result;
 }
 
+jlong JNI_callLongMethodLocked(jobject object, jmethodID methodID, ...)
+{
+	jlong result;
+	va_list args;
+	va_start(args, methodID);
+	result = JNI_callLongMethodLockedV(object, methodID, args);
+	va_end(args);
+	return result;
+}
+
+jlong JNI_callLongMethodLockedV(jobject object, jmethodID methodID, va_list args)
+{
+	jlong result;
+	BEGIN_CALL_MONITOR_HELD
+	result = (*env)->CallLongMethodV(env, object, methodID, args);
+	END_CALL_MONITOR_HELD
+	return result;
+}
+
 jshort JNI_callShortMethod(jobject object, jmethodID methodID, ...)
 {
 	jshort result;
@@ -380,12 +550,41 @@ jobject JNI_callObjectMethodLockedV(jobject object, jmethodID methodID, va_list 
 	return result;
 }
 
+jboolean JNI_callStaticBooleanMethod(jclass clazz, jmethodID methodID, ...)
+{
+	jboolean result;
+	va_list args;
+	va_start(args, methodID);
+	result = JNI_callStaticBooleanMethodV(clazz, methodID, args);
+	va_end(args);
+	return result;
+}
+
 jboolean JNI_callStaticBooleanMethodA(jclass clazz, jmethodID methodID, jvalue* args)
 {
 	jboolean result;
 	BEGIN_CALL
 	result = (*env)->CallStaticBooleanMethodA(env, clazz, methodID, args);
 	END_CALL
+	return result;
+}
+
+jboolean JNI_callStaticBooleanMethodV(jclass clazz, jmethodID methodID, va_list args)
+{
+	jboolean result;
+	BEGIN_CALL
+	result = (*env)->CallStaticBooleanMethodV(env, clazz, methodID, args);
+	END_CALL
+	return result;
+}
+
+jbyte JNI_callStaticByteMethod(jclass clazz, jmethodID methodID, ...)
+{
+	jbyte result;
+	va_list args;
+	va_start(args, methodID);
+	result = JNI_callStaticByteMethodV(clazz, methodID, args);
+	va_end(args);
 	return result;
 }
 
@@ -398,12 +597,88 @@ jbyte JNI_callStaticByteMethodA(jclass clazz, jmethodID methodID, jvalue* args)
 	return result;
 }
 
+jbyte JNI_callStaticByteMethodV(jclass clazz, jmethodID methodID, va_list args)
+{
+	jbyte result;
+	BEGIN_CALL
+	result = (*env)->CallStaticByteMethodV(env, clazz, methodID, args);
+	END_CALL
+	return result;
+}
+
+jshort JNI_callStaticShortMethod(jclass clazz, jmethodID methodID, ...)
+{
+	jshort result;
+	va_list args;
+	va_start(args, methodID);
+	result = JNI_callStaticShortMethodV(clazz, methodID, args);
+	va_end(args);
+	return result;
+}
+
+jshort JNI_callStaticShortMethodV(jclass clazz, jmethodID methodID, va_list args)
+{
+	jshort result;
+	BEGIN_CALL
+	result = (*env)->CallStaticShortMethodV(env, clazz, methodID, args);
+	END_CALL
+	return result;
+}
+
+jchar JNI_callStaticCharMethod(jclass clazz, jmethodID methodID, ...)
+{
+	jchar result;
+	va_list args;
+	va_start(args, methodID);
+	result = JNI_callStaticCharMethodV(clazz, methodID, args);
+	va_end(args);
+	return result;
+}
+
+jchar JNI_callStaticCharMethodV(jclass clazz, jmethodID methodID, va_list args)
+{
+	jchar result;
+	BEGIN_CALL
+	result = (*env)->CallStaticCharMethodV(env, clazz, methodID, args);
+	END_CALL
+	return result;
+}
+
+jdouble JNI_callStaticDoubleMethod(jclass clazz, jmethodID methodID, ...)
+{
+	jdouble result;
+	va_list args;
+	va_start(args, methodID);
+	result = JNI_callStaticDoubleMethodV(clazz, methodID, args);
+	va_end(args);
+	return result;
+}
+
 jdouble JNI_callStaticDoubleMethodA(jclass clazz, jmethodID methodID, jvalue* args)
 {
 	jdouble result;
 	BEGIN_CALL
 	result = (*env)->CallStaticDoubleMethodA(env, clazz, methodID, args);
 	END_CALL
+	return result;
+}
+
+jdouble JNI_callStaticDoubleMethodV(jclass clazz, jmethodID methodID, va_list args)
+{
+	jdouble result;
+	BEGIN_CALL
+	result = (*env)->CallStaticDoubleMethodV(env, clazz, methodID, args);
+	END_CALL
+	return result;
+}
+
+jfloat JNI_callStaticFloatMethod(jclass clazz, jmethodID methodID, ...)
+{
+	jfloat result;
+	va_list args;
+	va_start(args, methodID);
+	result = JNI_callStaticFloatMethodV(clazz, methodID, args);
+	va_end(args);
 	return result;
 }
 
@@ -416,11 +691,39 @@ jfloat JNI_callStaticFloatMethodA(jclass clazz, jmethodID methodID, jvalue* args
 	return result;
 }
 
+jfloat JNI_callStaticFloatMethodV(jclass clazz, jmethodID methodID, va_list args)
+{
+	jfloat result;
+	BEGIN_CALL
+	result = (*env)->CallStaticFloatMethodV(env, clazz, methodID, args);
+	END_CALL
+	return result;
+}
+
+jint JNI_callStaticIntMethod(jclass clazz, jmethodID methodID, ...)
+{
+	jint result;
+	va_list args;
+	va_start(args, methodID);
+	result = JNI_callStaticIntMethodV(clazz, methodID, args);
+	va_end(args);
+	return result;
+}
+
 jint JNI_callStaticIntMethodA(jclass clazz, jmethodID methodID, jvalue* args)
 {
 	jint result;
 	BEGIN_CALL
 	result = (*env)->CallStaticIntMethodA(env, clazz, methodID, args);
+	END_CALL
+	return result;
+}
+
+jint JNI_callStaticIntMethodV(jclass clazz, jmethodID methodID, va_list args)
+{
+	jint result;
+	BEGIN_CALL
+	result = (*env)->CallStaticIntMethodV(env, clazz, methodID, args);
 	END_CALL
 	return result;
 }
@@ -531,6 +834,21 @@ void JNI_callStaticVoidMethodV(jclass clazz, jmethodID methodID, va_list args)
 	END_CALL
 }
 
+void JNI_callStaticVoidMethodLocked(jclass clazz, jmethodID methodID, ...)
+{
+	va_list args;
+	va_start(args, methodID);
+	JNI_callStaticVoidMethodLockedV(clazz, methodID, args);
+	va_end(args);
+}
+
+void JNI_callStaticVoidMethodLockedV(jclass clazz, jmethodID methodID, va_list args)
+{
+	BEGIN_CALL_MONITOR_HELD
+	(*env)->CallStaticVoidMethodV(env, clazz, methodID, args);
+	END_CALL_MONITOR_HELD
+}
+
 void JNI_callVoidMethod(jobject object, jmethodID methodID, ...)
 {
 	va_list args;
@@ -566,7 +884,11 @@ jint JNI_createVM(JavaVM** javaVM, JavaVMInitArgs* vmArgs)
 	JNIEnv* env = 0;
 	jint jstat = pljava_createvm(javaVM, (void **)&env, vmArgs);
 	if(jstat == JNI_OK)
+	{
 		jniEnv = env;
+		primordialJNIEnv = env;
+		mainThreadId = env;
+	}
 	return jstat;
 }
 
@@ -632,9 +954,17 @@ void JNI_exceptionDescribe(void)
 	if(exh != 0)
 	{
 		(*env)->ExceptionClear(env);
-		printStacktrace(env, exh);
+		printStacktrace(env, exh, DEBUG1);
 		elogExceptionMessage(env, exh, WARNING);
 	}
+	END_JAVA
+}
+
+void JNI_exceptionStacktraceAtLevel(jthrowable exh, int elevel)
+{
+	BEGIN_JAVA
+	elogExceptionMessage(env, exh, elevel);
+	printStacktrace(env, exh, elevel);
 	END_JAVA
 }
 
@@ -719,6 +1049,33 @@ jfieldID JNI_getFieldID(jclass clazz, const char* name, const char* sig)
 	BEGIN_JAVA
 	result = (*env)->GetFieldID(env, clazz, name, sig);
 	END_JAVA
+	return result;
+}
+
+jfieldID JNI_getFieldIDOrNull(jclass clazz, const char* name, const char* sig)
+{
+	jfieldID result;
+	jobject exh;
+	BEGIN_CALL
+	result = (*env)->GetFieldID(env, clazz, name, sig);
+	if(result == 0) {
+		exh = (*env)->ExceptionOccurred(env);
+		if ( 0 != exh )
+		{
+			/*
+			 * Ignore a NoSuchFieldError, but not any other exception.
+			 * This operation order (first clear the pending exception, then
+			 * do the IsInstanceOf check, then Throw again if not the expected
+			 * class) avoids a benign -Xcheck:JNI warning about calling
+			 * IsInstanceOf while an exception is pending.
+			 */
+			(*env)->ExceptionClear(env);
+			if ( ! (*env)->IsInstanceOf(env, exh, NoSuchFieldError_class) )
+				(*env)->Throw(env, exh);
+			(*env)->DeleteLocalRef(env, exh);
+		}
+	}
+	END_CALL
 	return result;
 }
 
@@ -857,12 +1214,40 @@ jmethodID JNI_getStaticMethodIDOrNull(jclass clazz, const char* name, const char
 	result = (*env)->GetStaticMethodID(env, clazz, name, sig);
 	if(result == 0) {
 		exh = (*env)->ExceptionOccurred(env);
-		if ( 0 == exh
-			||  (*env)->IsInstanceOf(env, exh, NoSuchMethodError_class) )
-			(*env)->ExceptionClear(env); /* NoSuch... is only thing to ignore */
-		(*env)->DeleteLocalRef(env, exh);
+		if ( 0 != exh )
+		{
+			/*
+			 * Ignore a NoSuchMethodError, but not any other exception.
+			 * This operation order (first clear the pending exception, then
+			 * do the IsInstanceOf check, then Throw again if not the expected
+			 * class) avoids a benign -Xcheck:JNI warning about calling
+			 * IsInstanceOf while an exception is pending.
+			 */
+			(*env)->ExceptionClear(env);
+			if ( ! (*env)->IsInstanceOf(env, exh, NoSuchMethodError_class) )
+				(*env)->Throw(env, exh);
+			(*env)->DeleteLocalRef(env, exh);
+		}
 	}
 	END_CALL
+	return result;
+}
+
+jboolean JNI_getStaticBooleanField(jclass clazz, jfieldID field)
+{
+	jboolean result;
+	BEGIN_JAVA
+	result = (*env)->GetStaticBooleanField(env, clazz, field);
+	END_JAVA
+	return result;
+}
+
+jint JNI_getStaticIntField(jclass clazz, jfieldID field)
+{
+	jint result;
+	BEGIN_JAVA
+	result = (*env)->GetStaticIntField(env, clazz, field);
+	END_JAVA
 	return result;
 }
 
@@ -1078,6 +1463,25 @@ jobject JNI_newObjectV(jclass clazz, jmethodID ctor, va_list args)
 	return result;
 }
 
+jobject JNI_newObjectLocked(jclass clazz, jmethodID ctor, ...)
+{
+	jobject result;
+	va_list args;
+	va_start(args, ctor);
+	result = JNI_newObjectLockedV(clazz, ctor, args);
+	va_end(args);
+	return result;
+}
+
+jobject JNI_newObjectLockedV(jclass clazz, jmethodID ctor, va_list args)
+{
+	jobject result;
+	BEGIN_CALL_MONITOR_HELD
+	result = (*env)->NewObjectV(env, clazz, ctor, args);
+	END_CALL_MONITOR_HELD
+	return result;
+}
+
 void JNI_releaseByteArrayElements(jbyteArray array, jbyte* elems, jint mode)
 {
 	BEGIN_JAVA
@@ -1192,6 +1596,13 @@ void JNI_setLongArrayRegion(jlongArray array, jsize start, jsize len, jlong* buf
 	END_JAVA
 }
 
+void JNI_setIntField(jobject object, jfieldID field, jint value)
+{
+	BEGIN_JAVA
+	(*env)->SetIntField(env, object, field, value);
+	END_JAVA
+}
+
 void JNI_setLongField(jobject object, jfieldID field, jlong value)
 {
 	BEGIN_JAVA
@@ -1213,11 +1624,18 @@ void JNI_setShortArrayRegion(jshortArray array, jsize start, jsize len, jshort* 
 	END_JAVA
 }
 
+void JNI_setStaticObjectField(jclass clazz, jfieldID field, jobject value)
+{
+	BEGIN_JAVA
+	(*env)->SetStaticObjectField(env, clazz, field, value);
+	END_JAVA
+}
+
 void JNI_setThreadLock(jobject lockObject)
 {
 	BEGIN_JAVA
 	s_threadLock = (*env)->NewGlobalRef(env, lockObject);
-	if((*env)->MonitorEnter(env, s_threadLock) < 0)
+	if(NULL != s_threadLock  &&  (*env)->MonitorEnter(env, s_threadLock) < 0)
 		elog(ERROR, "Java enter monitor failure (initial)");
 	END_JAVA
 }
@@ -1229,4 +1647,125 @@ jint JNI_throw(jthrowable obj)
 	result = (*env)->Throw(env, obj);
 	END_JAVA
 	return result;
+}
+
+/*
+ * Implementations of the context class loader updater and restorer.
+ * The loader reference passed in is not to be deleted. If saved anywhere,
+ * a new global ref is to be taken, and later deleted when restored.
+ */
+
+static inline void _updaterCommon(JNIEnv *env, jobject thread, jobject loader)
+{
+	jobject old = (*env)->GetObjectField(env, thread, s_Thread_contextLoader);
+
+	/*
+	 * If it is not already the loader we want, change it, and set
+	 * currentInvocation->savedLoader to restore it later. If this is
+	 * a top-level invocation, we don't care what it gets restored to, so lie,
+	 * and save loader there instead of old. If there are many consecutive
+	 * top-level calls with the same context loader, that will save work later.
+	 *
+	 * If it is already the loader we want, again we check for a top-level call,
+	 * and can leave currentInvocation->savedLoader completely unset in that
+	 * case, so the restore call will be skipped completely. If not a top-level
+	 * call, though, see that it gets restored to what the caller might expect,
+	 * even if it somehow got changed.
+	 */
+
+	if ( ! (*env)->IsSameObject(env, old, loader) )
+	{
+		(*env)->SetObjectField(env, thread, s_Thread_contextLoader, loader);
+
+		currentInvocation->savedLoader = (*env)->NewGlobalRef(env,
+			( NULL == currentInvocation->previous ) ? loader : old);
+	}
+	else if ( NULL != currentInvocation->previous )
+		currentInvocation->savedLoader = (*env)->NewGlobalRef(env, old);
+
+	(*env)->DeleteLocalRef(env, old);
+}
+
+static void _heavyUpdater(jobject loader)
+{
+	jobject thread;
+	jobject exh;
+
+	BEGIN_JAVA
+
+	thread =
+		(*env)->CallStaticObjectMethod(env,
+			s_Thread_class, s_Thread_currentThread); /* should never fail */
+
+	exh = (*env)->ExceptionOccurred(env); /* but mollify -Xcheck:jni anyway */
+	if(exh != 0)
+	{
+		(*env)->ExceptionClear(env);
+		elogExceptionMessage(env, exh, ERROR);
+	}
+
+	_updaterCommon(env, thread, loader);
+
+	(*env)->DeleteLocalRef(env, thread);
+
+	END_JAVA
+}
+
+void _heavyRestorer()
+{
+	jobject thread;
+	jobject value;
+	jobject exh;
+
+	BEGIN_JAVA
+
+	thread =
+		(*env)->CallStaticObjectMethod(env,
+			s_Thread_class, s_Thread_currentThread); /* should never fail */
+
+	exh = (*env)->ExceptionOccurred(env); /* but mollify -Xcheck:jni anyway */
+	if(exh != 0)
+	{
+		(*env)->ExceptionClear(env);
+		elogExceptionMessage(env, exh, ERROR);
+	}
+
+	value = currentInvocation->savedLoader;
+
+	(*env)->SetObjectField(env, thread, s_Thread_contextLoader, value);
+	(*env)->DeleteGlobalRef(env, value);
+	(*env)->DeleteLocalRef(env, thread);
+
+	END_JAVA
+}
+
+static void _lightUpdater(jobject loader)
+{
+	BEGIN_JAVA
+
+	_updaterCommon(env, s_threadObject, loader);
+
+	END_JAVA
+}
+
+void _lightRestorer()
+{
+	jobject value;
+
+	BEGIN_JAVA
+
+	value = currentInvocation->savedLoader;
+
+	(*env)->SetObjectField(env, s_threadObject, s_Thread_contextLoader, value);
+	(*env)->DeleteGlobalRef(env, value);
+
+	END_JAVA
+}
+
+static void _noopUpdater(jobject loader)
+{
+}
+
+void _noopRestorer()
+{
 }

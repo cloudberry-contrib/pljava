@@ -1,14 +1,23 @@
 /*
- * Copyright (c) 2004, 2005, 2006 TADA AB - Taby Sweden
- * Distributed under the terms shown in the file COPYRIGHT
- * found in the root folder of this project or at
- * http://eng.tada.se/osprojects/COPYRIGHT.html
+ * Copyright (c) 2004-2019 Tada AB and other contributors, as listed below.
+ *
+ * All rights reserved. This program and the accompanying materials
+ * are made available under the terms of the The BSD 3-Clause License
+ * which accompanies this distribution, and is available at
+ * http://opensource.org/licenses/BSD-3-Clause
+ *
+ * Contributors:
+ *   Tada AB
+ *   Chapman Flack
  */
 package org.postgresql.pljava.internal;
 
 import java.sql.ResultSet;
 import java.sql.SQLException;
 
+import static org.postgresql.pljava.internal.Backend.doInPG;
+
+import org.postgresql.pljava.TriggerException;
 import org.postgresql.pljava.jdbc.TriggerResultSet;
 
 /**
@@ -16,17 +25,74 @@ import org.postgresql.pljava.jdbc.TriggerResultSet;
  * 
  * @author Thomas Hallgren
  */
-public class TriggerData extends JavaWrapper implements org.postgresql.pljava.TriggerData
+public class TriggerData implements org.postgresql.pljava.TriggerData
 {
 	private Relation m_relation;
 	private TriggerResultSet m_old = null;
 	private TriggerResultSet m_new = null;
 	private Tuple m_newTuple;
 	private Tuple m_triggerTuple;
+	private boolean m_suppress = false;
+	private final State m_state;
 
-	TriggerData(long pointer)
+	TriggerData(DualState.Key cookie, long resourceOwner, long pointer)
 	{
-		super(pointer);
+		m_state = new State(cookie, this, resourceOwner, pointer);
+	}
+
+	private static class State
+	extends DualState.SingleGuardedLong<TriggerData>
+	{
+		private State(
+			DualState.Key cookie, TriggerData td, long ro, long hth)
+		{
+			super(cookie, td, ro, hth);
+		}
+
+		/**
+		 * Return the TriggerData pointer.
+		 *<p>
+		 * This is a transitional implementation: ideally, each method requiring
+		 * the native state would be moved to this class, and hold the pin for
+		 * as long as the state is being manipulated. Simply returning the
+		 * guarded value out from under the pin, as here, is not great practice,
+		 * but as long as the value is only used in instance methods of
+		 * TriggerData, or subclasses, or something with a strong reference
+		 * to this TriggerData, and only on a thread for which
+		 * {@code Backend.threadMayEnterPG()} is true, disaster will not strike.
+		 * It can't go Java-unreachable while an instance method's on the call
+		 * stack, and the {@code Invocation} marking this state's native scope
+		 * can't be popped before return of any method using the value.
+		 */
+		private long getTriggerDataPtr() throws SQLException
+		{
+			pin();
+			try
+			{
+				return guardedLong();
+			}
+			finally
+			{
+				unpin();
+			}
+		}
+	}
+
+	private long getNativePointer() throws SQLException
+	{
+		return m_state.getTriggerDataPtr();
+	}
+
+	@Override
+	public void suppress() throws SQLException
+	{
+		if ( isFiredForStatement() )
+			throw new TriggerException(this,
+				"Attempt to suppress operation in a STATEMENT trigger");
+		if ( isFiredAfter() )
+			throw new TriggerException(this,
+				"Attempt to suppress operation in an AFTER trigger");
+		m_suppress = true;
 	}
 
 	/**
@@ -90,16 +156,23 @@ public class TriggerData extends JavaWrapper implements org.postgresql.pljava.Tr
 	 * <code>new</code> and returns the native pointer of new tuple. This
 	 * method is called automatically by the trigger handler and should not
 	 * be called in any other way.
+	 *<p>
+	 * Note: starting with PostgreSQL 10, this method can fail if SPI is not
+	 * connected; it is the <em>caller's</em> responsibility in PG 10 and up
+	 * to ensure that SPI is connected <em>and</em> that a longer-lived memory
+	 * context than SPI's has been selected, if the caller wants the result of
+	 * this call to survive {@code SPI_finish}.
 	 * 
 	 * @return The modified tuple, or if no modifications have been made, the
 	 *         original tuple.
 	 */
 	public long getTriggerReturnTuple() throws SQLException
 	{
-		if(this.isFiredForStatement() || this.isFiredAfter())
+		if(this.isFiredForStatement() || this.isFiredAfter() || m_suppress)
 			//
-			// Only triggers fired before each row can have a return
-			// value.
+			// Only triggers fired for each row, and not AFTER, can have a
+			// nonzero return value. If such a trigger does return zero, it
+			// tells PostgreSQL to silently suppress the row operation involved.
 			//
 			return 0;
 
@@ -141,10 +214,7 @@ public class TriggerData extends JavaWrapper implements org.postgresql.pljava.Tr
 	{
 		if(m_relation == null)
 		{
-			synchronized(Backend.THREADLOCK)
-			{
-				m_relation = _getRelation(this.getNativePointer());
-			}
+			m_relation = doInPG(() -> _getRelation(this.getNativePointer()));
 		}
 		return m_relation;
 	}
@@ -167,10 +237,8 @@ public class TriggerData extends JavaWrapper implements org.postgresql.pljava.Tr
 	{
 		if(m_triggerTuple == null)
 		{
-			synchronized(Backend.THREADLOCK)
-			{
-				m_triggerTuple = _getTriggerTuple(this.getNativePointer());
-			}
+			m_triggerTuple =
+				doInPG(() -> _getTriggerTuple(this.getNativePointer()));
 		}
 		return m_triggerTuple;
 	}
@@ -191,10 +259,7 @@ public class TriggerData extends JavaWrapper implements org.postgresql.pljava.Tr
 	{
 		if(m_newTuple == null)
 		{
-			synchronized(Backend.THREADLOCK)
-			{
-				m_newTuple = _getNewTuple(this.getNativePointer());
-			}
+			m_newTuple = doInPG(() -> _getNewTuple(this.getNativePointer()));
 		}
 		return m_newTuple;
 	}
@@ -210,10 +275,7 @@ public class TriggerData extends JavaWrapper implements org.postgresql.pljava.Tr
 	public String[] getArguments()
 	throws SQLException
 	{
-		synchronized(Backend.THREADLOCK)
-		{
-			return _getArguments(this.getNativePointer());
-		}
+		return doInPG(() -> _getArguments(this.getNativePointer()));
 	}
 
 	/**
@@ -226,10 +288,7 @@ public class TriggerData extends JavaWrapper implements org.postgresql.pljava.Tr
 	public String getName()
 	throws SQLException
 	{
-		synchronized(Backend.THREADLOCK)
-		{
-			return _getName(this.getNativePointer());
-		}
+		return doInPG(() -> _getName(this.getNativePointer()));
 	}
 
 	/**
@@ -242,10 +301,7 @@ public class TriggerData extends JavaWrapper implements org.postgresql.pljava.Tr
 	public boolean isFiredAfter()
 	throws SQLException
 	{
-		synchronized(Backend.THREADLOCK)
-		{
-			return _isFiredAfter(this.getNativePointer());
-		}
+		return doInPG(() -> _isFiredAfter(this.getNativePointer()));
 	}
 
 	/**
@@ -258,10 +314,7 @@ public class TriggerData extends JavaWrapper implements org.postgresql.pljava.Tr
 	public boolean isFiredBefore()
 	throws SQLException
 	{
-		synchronized(Backend.THREADLOCK)
-		{
-			return _isFiredBefore(this.getNativePointer());
-		}
+		return doInPG(() -> _isFiredBefore(this.getNativePointer()));
 	}
 
 	/**
@@ -274,10 +327,7 @@ public class TriggerData extends JavaWrapper implements org.postgresql.pljava.Tr
 	public boolean isFiredForEachRow()
 	throws SQLException
 	{
-		synchronized(Backend.THREADLOCK)
-		{
-			return _isFiredForEachRow(this.getNativePointer());
-		}
+		return doInPG(() -> _isFiredForEachRow(this.getNativePointer()));
 	}
 
 	/**
@@ -290,10 +340,7 @@ public class TriggerData extends JavaWrapper implements org.postgresql.pljava.Tr
 	public boolean isFiredForStatement()
 	throws SQLException
 	{
-		synchronized(Backend.THREADLOCK)
-		{
-			return _isFiredForStatement(this.getNativePointer());
-		}
+		return doInPG(() -> _isFiredForStatement(this.getNativePointer()));
 	}
 
 	/**
@@ -305,10 +352,7 @@ public class TriggerData extends JavaWrapper implements org.postgresql.pljava.Tr
 	public boolean isFiredByDelete()
 	throws SQLException
 	{
-		synchronized(Backend.THREADLOCK)
-		{
-			return _isFiredByDelete(this.getNativePointer());
-		}
+		return doInPG(() -> _isFiredByDelete(this.getNativePointer()));
 	}
 
 	/**
@@ -320,10 +364,7 @@ public class TriggerData extends JavaWrapper implements org.postgresql.pljava.Tr
 	public boolean isFiredByInsert()
 	throws SQLException
 	{
-		synchronized(Backend.THREADLOCK)
-		{
-			return _isFiredByInsert(this.getNativePointer());
-		}
+		return doInPG(() -> _isFiredByInsert(this.getNativePointer()));
 	}
 
 	/**
@@ -335,13 +376,9 @@ public class TriggerData extends JavaWrapper implements org.postgresql.pljava.Tr
 	public boolean isFiredByUpdate()
 	throws SQLException
 	{
-		synchronized(Backend.THREADLOCK)
-		{
-			return _isFiredByUpdate(this.getNativePointer());
-		}
+		return doInPG(() -> _isFiredByUpdate(this.getNativePointer()));
 	}
 
-	protected native void _free(long pointer);
 	private static native Relation _getRelation(long pointer) throws SQLException;
 	private static native Tuple _getTriggerTuple(long pointer) throws SQLException;
 	private static native Tuple _getNewTuple(long pointer) throws SQLException;

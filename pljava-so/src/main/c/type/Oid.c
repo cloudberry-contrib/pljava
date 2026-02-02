@@ -1,10 +1,14 @@
 /*
- * Copyright (c) 2004, 2005, 2006 TADA AB - Taby Sweden
- * Distributed under the terms shown in the file COPYRIGHT
- * found in the root folder of this project or at
- * http://eng.tada.se/osprojects/COPYRIGHT.html
+ * Copyright (c) 2004-2023 Tada AB and other contributors, as listed below.
  *
- * @author Thomas Hallgren
+ * All rights reserved. This program and the accompanying materials
+ * are made available under the terms of the The BSD 3-Clause License
+ * which accompanies this distribution, and is available at
+ * http://opensource.org/licenses/BSD-3-Clause
+ *
+ * Contributors:
+ *   Tada AB
+ *   Chapman Flack
  */
 #include <postgres.h>
 
@@ -18,6 +22,7 @@
 #include "pljava/type/Oid.h"
 #include "pljava/type/String.h"
 #include "pljava/Exception.h"
+#include "pljava/Function.h"
 #include "pljava/Invocation.h"
 
 #define pg_unreachable() abort()
@@ -34,6 +39,14 @@ static jobject   s_OidOid;
 jobject Oid_create(Oid oid)
 {
 	jobject joid;
+	/*
+	 * This is a natural place to have a StaticAssertStmt making sure the
+	 * ubiquitous PG type 'Oid' fits in a jint. If it is ever removed from here
+	 * or this code goes away, it should go someplace else. If it ever produces
+	 * an error, don't assume the only things that need fixing will be in this
+	 * file or nearby....
+	 */
+	StaticAssertStmt(sizeof(Oid) <= sizeof(jint), "Oid wider than jint?!");
 	if(OidIsValid(oid))
 		joid = JNI_newObject(s_Oid_class, s_Oid_init, oid);
 	else
@@ -105,13 +118,39 @@ Oid Oid_forSqlType(int sqlType)
 		case java_sql_Types_DATALINK:
 			typeId = TEXTOID;
 			break;
-/*		case java_sql_Types_NULL:
+		case java_sql_Types_NULL:
 		case java_sql_Types_OTHER:
 		case java_sql_Types_JAVA_OBJECT:
 		case java_sql_Types_DISTINCT:
 		case java_sql_Types_STRUCT:
 		case java_sql_Types_ARRAY:
-		case java_sql_Types_REF: */
+		case java_sql_Types_REF:
+			typeId = InvalidOid;	/* Not yet mapped */
+			break;
+
+		/* JDBC 4.0 - present in Java 6 and later, no need to conditionalize */
+		case java_sql_Types_SQLXML:
+#ifdef	XMLOID					/* but PG can have been built without libxml */
+			typeId = XMLOID;
+#else
+			typeId = InvalidOid;
+#endif
+			break;
+		case java_sql_Types_ROWID:
+		case java_sql_Types_NCHAR:
+		case java_sql_Types_NVARCHAR:
+		case java_sql_Types_LONGNVARCHAR:
+		case java_sql_Types_NCLOB:
+			typeId = InvalidOid;	/* Not yet mapped */
+			break;
+
+		case java_sql_Types_TIME_WITH_TIMEZONE:
+			typeId = TIMETZOID;
+			break;
+		case java_sql_Types_TIMESTAMP_WITH_TIMEZONE:
+			typeId = TIMESTAMPTZOID;
+			break;
+		case java_sql_Types_REF_CURSOR:
 		default:
 			typeId = InvalidOid;	/* Not yet mapped */
 			break;
@@ -157,6 +196,11 @@ void Oid_initialize(void)
 		"_getJavaClassName",
 		"(I)Ljava/lang/String;",
 	  	Java_org_postgresql_pljava_internal_Oid__1getJavaClassName
+		},
+		{
+		"_getCurrentLoader",
+		"()Ljava/lang/ClassLoader;",
+		Java_org_postgresql_pljava_internal_Oid__1getCurrentLoader
 		},
 		{ 0, 0, 0 }};
 
@@ -218,11 +262,7 @@ Java_org_postgresql_pljava_internal_Oid__1forTypeName(JNIEnv* env, jclass cls, j
 		PG_TRY();
 		{
 			int32 typmod = 0;
-#if PG_VERSION_NUM < 90400
-			parseTypeString(typeNameOrOid, &typeId, &typmod);
-#else
 			parseTypeString(typeNameOrOid, &typeId, &typmod, 0);
-#endif
 		}
 		PG_CATCH();
 		{
@@ -266,6 +306,21 @@ Java_org_postgresql_pljava_internal_Oid__1getJavaClassName(JNIEnv* env, jclass c
 		Type type = Type_objectTypeFromOid((Oid)oid, Invocation_getTypeMap());
 		result = String_createJavaStringFromNTS(Type_getJavaTypeName(type));
 	}
+	END_NATIVE
+	return result;
+}
+
+/*
+ * Class:     org_postgresql_pljava_internal_Oid
+ * Method:    _getCurrentLoader
+ * Signature: ()Ljava/lang/ClassLoader;
+ */
+JNIEXPORT jobject JNICALL
+Java_org_postgresql_pljava_internal_Oid__1getCurrentLoader(JNIEnv *env, jclass cls)
+{
+	jobject result = NULL;
+	BEGIN_NATIVE
+	result = Function_currentLoader();
 	END_NATIVE
 	return result;
 }

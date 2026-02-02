@@ -1,10 +1,14 @@
 /*
- * Copyright (c) 2004, 2005, 2006 TADA AB - Taby Sweden
- * Distributed under the terms shown in the file COPYRIGHT
- * found in the root folder of this project or at
- * http://eng.tada.se/osprojects/COPYRIGHT.html
+ * Copyright (c) 2004-2023 Tada AB and other contributors, as listed below.
  *
- * @author Thomas Hallgren
+ * All rights reserved. This program and the accompanying materials
+ * are made available under the terms of the The BSD 3-Clause License
+ * which accompanies this distribution, and is available at
+ * http://opensource.org/licenses/BSD-3-Clause
+ *
+ * Contributors:
+ *   Tada AB
+ *   Chapman Flack
  */
 #include "org_postgresql_pljava_internal_SPI.h"
 #include "pljava/SPI.h"
@@ -19,10 +23,9 @@
 #include <miscadmin.h>
 #endif
 
-#define pg_unreachable() abort()
-
-
-Savepoint* infant = 0;
+#define CONFIRMCONST(c) \
+StaticAssertStmt((c) == (org_postgresql_pljava_internal_##c), \
+	"Java/C value mismatch for " #c)
 
 extern void SPI_initialize(void);
 void SPI_initialize(void)
@@ -30,12 +33,12 @@ void SPI_initialize(void)
 	JNINativeMethod methods[] = {
 		{
 		"_exec",
-	  	"(JLjava/lang/String;I)I",
-	  	Java_org_postgresql_pljava_internal_SPI__1exec
+		"(Ljava/lang/String;I)I",
+		Java_org_postgresql_pljava_internal_SPI__1exec
 		},
 		{
 		"_getProcessed",
-		"()I",
+		"()J",
 		Java_org_postgresql_pljava_internal_SPI__1getProcessed
 		},
 		{
@@ -56,6 +59,54 @@ void SPI_initialize(void)
 		{ 0, 0, 0 }};
 
 	PgObject_registerNatives("org/postgresql/pljava/internal/SPI", methods);
+
+	/*
+	 * Statically assert that the Java code has the right values for these.
+	 * I would rather have this at the top, but these count as statements and
+	 * would trigger a declaration-after-statment warning.
+	 */
+	CONFIRMCONST(SPI_ERROR_CONNECT);
+	CONFIRMCONST(SPI_ERROR_COPY);
+	CONFIRMCONST(SPI_ERROR_OPUNKNOWN);
+	CONFIRMCONST(SPI_ERROR_UNCONNECTED);
+	CONFIRMCONST(SPI_ERROR_CURSOR);
+	CONFIRMCONST(SPI_ERROR_ARGUMENT);
+	CONFIRMCONST(SPI_ERROR_PARAM);
+	CONFIRMCONST(SPI_ERROR_TRANSACTION);
+	CONFIRMCONST(SPI_ERROR_NOATTRIBUTE);
+	CONFIRMCONST(SPI_ERROR_NOOUTFUNC);
+	CONFIRMCONST(SPI_ERROR_TYPUNKNOWN);
+#if PG_VERSION_NUM >= 100000
+	CONFIRMCONST(SPI_ERROR_REL_DUPLICATE);
+	CONFIRMCONST(SPI_ERROR_REL_NOT_FOUND);
+#endif
+
+	CONFIRMCONST(SPI_OK_CONNECT);
+	CONFIRMCONST(SPI_OK_FINISH);
+	CONFIRMCONST(SPI_OK_FETCH);
+	CONFIRMCONST(SPI_OK_UTILITY);
+	CONFIRMCONST(SPI_OK_SELECT);
+	CONFIRMCONST(SPI_OK_SELINTO);
+	CONFIRMCONST(SPI_OK_INSERT);
+	CONFIRMCONST(SPI_OK_DELETE);
+	CONFIRMCONST(SPI_OK_UPDATE);
+	CONFIRMCONST(SPI_OK_CURSOR);
+	CONFIRMCONST(SPI_OK_INSERT_RETURNING);
+	CONFIRMCONST(SPI_OK_DELETE_RETURNING);
+	CONFIRMCONST(SPI_OK_UPDATE_RETURNING);
+	CONFIRMCONST(SPI_OK_REWRITTEN);
+#if PG_VERSION_NUM >= 100000
+	CONFIRMCONST(SPI_OK_REL_REGISTER);
+	CONFIRMCONST(SPI_OK_REL_UNREGISTER);
+	CONFIRMCONST(SPI_OK_TD_REGISTER);
+#endif
+#if PG_VERSION_NUM >= 150000
+	CONFIRMCONST(SPI_OK_MERGE);
+#endif
+
+#if PG_VERSION_NUM >= 110000
+	CONFIRMCONST(SPI_OPT_NONATOMIC);
+#endif
 }
 
 /****************************************
@@ -64,10 +115,10 @@ void SPI_initialize(void)
 /*
  * Class:     org_postgresql_pljava_internal_SPI
  * Method:    _exec
- * Signature: (JLjava/lang/String;I)I
+ * Signature: (Ljava/lang/String;I)I
  */
 JNIEXPORT jint JNICALL
-Java_org_postgresql_pljava_internal_SPI__1exec(JNIEnv* env, jclass cls, jlong threadId, jstring cmd, jint count)
+Java_org_postgresql_pljava_internal_SPI__1exec(JNIEnv* env, jclass cls, jstring cmd, jint count)
 {
 	jint result = 0;
 
@@ -76,7 +127,7 @@ Java_org_postgresql_pljava_internal_SPI__1exec(JNIEnv* env, jclass cls, jlong th
 	if(command != 0)
 	{
 		STACK_BASE_VARS
-		STACK_BASE_PUSH(threadId)
+		STACK_BASE_PUSH(env)
 		PG_TRY();
 		{
 			Invocation_assertConnect();
@@ -100,12 +151,12 @@ Java_org_postgresql_pljava_internal_SPI__1exec(JNIEnv* env, jclass cls, jlong th
 /*
  * Class:     org_postgresql_pljava_internal_SPI
  * Method:    _getProcessed
- * Signature: ()I
+ * Signature: ()J
  */
-JNIEXPORT jint JNICALL
+JNIEXPORT jlong JNICALL
 Java_org_postgresql_pljava_internal_SPI__1getProcessed(JNIEnv* env, jclass cls)
 {
-	return (jint)SPI_processed;
+	return (jlong)SPI_processed;
 }
 
 /*
@@ -152,57 +203,4 @@ Java_org_postgresql_pljava_internal_SPI__1freeTupTable(JNIEnv* env, jclass cls)
 		SPI_tuptable = 0;
 		END_NATIVE
 	}
-}
-
-static void assertXid(SubTransactionId xid)
-{
-	if(xid != GetCurrentSubTransactionId())
-	{
-		/* Oops. Rollback to top level transaction.
-		 */
-		ereport(ERROR, (
-			errcode(ERRCODE_INVALID_TRANSACTION_TERMINATION),
-			errmsg("Subtransaction mismatch at txlevel %d",
-				GetCurrentTransactionNestLevel())));
-	}
-}
-
-Savepoint* SPI_setSavepoint(const char* name)
-{
-	Savepoint* sp = (Savepoint*)palloc(sizeof(Savepoint) + strlen(name));
-	Invocation_assertConnect();
-	sp->nestingLevel = GetCurrentTransactionNestLevel() + 1;
-	strcpy(sp->name, name);
-	infant = sp;
-	BeginInternalSubTransaction(sp->name);
-	infant = 0;
-	sp->xid = GetCurrentSubTransactionId();
-	return sp;
-}
-
-void SPI_releaseSavepoint(Savepoint* sp)
-{
-	while(sp->nestingLevel < GetCurrentTransactionNestLevel())
-		ReleaseCurrentSubTransaction();
-
-	if(sp->nestingLevel == GetCurrentTransactionNestLevel())
-	{
-		assertXid(sp->xid);
-		ReleaseCurrentSubTransaction();
-	}
-	pfree(sp);
-}
-
-void SPI_rollbackSavepoint(Savepoint* sp)
-{
-	while(sp->nestingLevel < GetCurrentTransactionNestLevel())
-		RollbackAndReleaseCurrentSubTransaction();
-
-	if(sp->nestingLevel == GetCurrentTransactionNestLevel())
-	{
-		assertXid(sp->xid);
-		RollbackAndReleaseCurrentSubTransaction();
-	}
-	SPI_restore_connection();
-	pfree(sp);
 }

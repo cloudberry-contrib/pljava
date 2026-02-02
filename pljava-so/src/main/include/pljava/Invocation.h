@@ -1,8 +1,14 @@
 /*
- * Copyright (c) 2004, 2005, 2006 TADA AB - Taby Sweden
- * Distributed under the terms shown in the file COPYRIGHT
- * found in the root folder of this project or at
- * http://eng.tada.se/osprojects/COPYRIGHT.html
+ * Copyright (c) 2004-2021 Tada AB and other contributors, as listed below.
+ *
+ * All rights reserved. This program and the accompanying materials
+ * are made available under the terms of the The BSD 3-Clause License
+ * which accompanies this distribution, and is available at
+ * http://opensource.org/licenses/BSD-3-Clause
+ *
+ * Contributors:
+ *   Tada AB
+ *   Chapman Flack
  *
  * @author Thomas Hallgren
  */
@@ -10,14 +16,14 @@
 #define __pljava_Invocation_h
 
 #include <postgres.h>
+#if PG_VERSION_NUM >= 100000
+#include <commands/trigger.h>
+#endif
 #include "pljava/pljava.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-struct CallLocal_;
-typedef struct CallLocal_ CallLocal;
 
 struct Invocation_
 {
@@ -46,9 +52,29 @@ struct Invocation_
 	bool          inExprContextCB;
 
 	/**
-	 * Set to true if the executing function is trusted
+	 * The saved limits reserved in Function.c's static parameter frame, as a
+	 * count of reference and primitive parameters combined in a short.
+	 * FRAME_LIMITS_PUSHED is an otherwise invalid value used to record that the
+	 * more heavyweight saving of the frame as a Java ParameterFrame instance
+	 * has occurred. Otherwise, this value (and the primitive slot 0 value
+	 * below) are simply restored when this Invocation is exited normally or
+	 * exceptionally.
 	 */
-	bool          trusted;
+	jshort frameLimits;
+#define FRAME_LIMITS_PUSHED ((jshort)-1)
+
+	/**
+	 * The saved value of the first primitive slot in Function's static
+	 * parameter frame. Unless frameLimits above is FRAME_LIMITS_PUSHED, this
+	 * value is simply restored when this Invocation is exited normally or
+	 * exceptionally.
+	 */
+	jvalue primSlot0;
+
+	/**
+	 * The saved thread context classloader from before this invocation
+	 */
+	jobject savedLoader;
 
 	/**
 	 * The currently executing Function.
@@ -61,13 +87,16 @@ struct Invocation_
 	 * be prevented until this flag is reset (by a rollback
 	 * of a savepoint or function exit).
 	 */
-	bool          errorOccured;
+	bool          errorOccurred;
 
+#if PG_VERSION_NUM >= 100000
 	/**
-	 * List of call local structures that has been wrapped
-	 * during this invocation.
+	 * TriggerData pointer, if the function is being called as a trigger,
+	 * so it can be passed to SPI_register_trigger_data if the function connects
+	 * to SPI.
 	 */
-	CallLocal*    callLocals;
+	TriggerData*  triggerData;
+#endif
 
 	/**
 	 * The previous call context when nested function calls
@@ -87,14 +116,17 @@ extern void Invocation_pushBootContext(Invocation* ctx);
 
 extern void Invocation_popBootContext(void);
 
-extern void Invocation_pushInvocation(Invocation* ctx, bool trusted);
+extern void Invocation_pushInvocation(Invocation* ctx);
 
 extern void Invocation_popInvocation(bool wasException);
 
-extern jlong Invocation_createLocalWrapper(void* pointer);
-extern void* Invocation_getWrappedPointer(jlong wrapper);
-extern void Invocation_freeLocalWrapper(jlong wrapper);
-
+/*
+ * Return the type map held by the innermost executing PL/Java function's
+ * schema loader (the initiating loader that was used to resolve the function).
+ * The type map is a map from Java Oid objects to Class<SQLData> class objects,
+ * as resolved by that loader. This is effectively Function_currentLoader()
+ * followed by JNI-invoking getTypeMap on the loader, but cached to avoid JNI).
+ */
 extern jobject Invocation_getTypeMap(void);
 
 /*
@@ -106,6 +138,13 @@ extern jobject Invocation_getTypeMap(void);
  * is the context returned from this call.
  */
 extern MemoryContext Invocation_switchToUpperContext(void);
+
+/*
+ * Called only during Function's initialization to supply these values, making
+ * them cheap to access during pushInvocation/popInvocation, while still a bit
+ * more encapsulated than if they were made global.
+ */
+extern void pljava_Invocation_shareFrame(jvalue *slot0, jshort *limits);
 
 #ifdef __cplusplus
 }

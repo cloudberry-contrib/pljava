@@ -4,6 +4,64 @@ The PostgreSQL configuration variable `pljava.vmoptions` can be used to
 supply custom options to the Java VM when it is started. Several of these
 options are likely to be worth setting.
 
+If using [the OpenJ9 JVM][hsj9], be sure to look also at the
+[VM options specific to OpenJ9][vmoptJ9].
+
+## Selecting operation with or without security policy enforcement
+
+PL/Java can operate [with security policy enforcement][policy], its former
+default and only mode, or [with no policy enforcement][unenforced], the only
+mode available on stock Java 24 and later.
+
+When `pljava.libjvm_location` points to a Java 17 or earlier JVM, there is
+no special VM option needed, and PL/Java will operate with policy enforcement
+by default. However, when `pljava.libjvm_location` points to a Java 18 or later
+JVM, `pljava.vmoptions` must contain either `-Djava.security.manager=allow` or
+`-Djava.security.manager=disallow`, to select operation with or without policy
+enforcement, respectively. No setting other than `allow` or `disallow` will
+work. Only `disallow` is available for stock Java 24 or later.
+
+For just how to configure specific Java versions, see
+[Available policy-enforcement settings by Java version][smprop].
+
+Before operating with `disallow`, the implications detailed in
+[PL/Java with no policy enforcement][unenforced] should be carefully reviewed.
+
+[policy]: ../use/policy.html
+[unenforced]: ../use/unenforced.html
+[smprop]: smproperty.html
+
+## Adding to the set of readable modules
+
+By default, a small set of Java modules (including `java.base`,
+`org.postgresql.pljava`, and `java.sql` and its transitive dependencies,
+which include `java.xml`) will be readable to any Java code installed with
+`install_jar`.
+
+While those modules may be enough for many uses, other modules are easily added
+using `--add-modules` within `pljava.vmoptions`. For example,
+`--add-modules=java.net.http,java.rmi` would make the HTTP Client and WebSocket
+APIs readable, along with the Remote Method Invocation API.
+
+For convenience, the module `java.se` simply transitively requires all the
+modules that make up the full Java SE API, so `--add-modules=java.se` will make
+that full API available to PL/Java code without further thought. The cost,
+however, may be that PL/Java uses more memory and starts more slowly than if
+only a few needed modules were named.
+
+For just that reason, there is also a `--limit-modules` option that can be used
+to trim the set of readable modules to the minimum genuinely needed. More on the
+use of that option [here][limitmods].
+
+[limitmods]: ../use/jpms.html#Limiting_the_module_graph
+
+Third-party modular code can be made available by adding the modular jars
+to `pljava.module_path` (see [configuration variables](../use/variables.html))
+and naming those modules in `--add-modules`. PL/Java currently treats all jars
+loaded with `install_jar` as unnamed-module, legacy classpath code.
+
+For more, see [PL/Java and the Java Platform Module System](../use/jpms.html).
+
 ## Byte order for PL/Java-implemented user-defined types
 
 PL/Java is free of byte-order issues except when using its features for building
@@ -19,19 +77,33 @@ the topic and an advance notice of an expected future migration step.
 
 Class data sharing is a commonly-supported Java virtual machine feature
 that reduces both VM startup time and memory footprint by having many of
-Java's runtime classes preprocessed into a `classes.jsa` file that can
+Java's runtime classes preprocessed into a file that can
 be quickly memory-mapped into the process at Java startup, and shared
-if there are multiple processes running Java VMs. It is enabled by including
+if there are multiple processes running Java VMs.
 
-    -Xshare:on
+How to set it up differs depending on the Java VM in use, Hotspot
+(in [Oracle Java][orjava] or [OpenJDK with Hotspot][OpenJDK]), or OpenJ9
+(an [alternate JVM][hsj9] also available with [OpenJDK][]). The instructions on
+this page are specific to Hotspot. For the corresponding feature in OpenJ9,
+which is worth a good look, see the [class sharing in OpenJ9][cdsJ9] page.
 
+For Hotspot, the class data sharing is enabled by including
+`-Xshare:on` or `-Xshare:auto`
 in the `pljava.vmoptions` string. In rough terms in 64-bit Java 8 it can
 reduce the 'Metaspace' size per PL/Java backend by slightly over 4 MB, and
 cut about 15 percent from the PL/Java startup time per process.
 
 Sharing may be enabled automatically if the Java VM runs in `client` mode
-(described below), but usually *must* be turned on with `-Xshare:on` if the
-VM runs in `server` mode.
+(described below), but may need to be turned on with `-Xshare:on` or
+`-Xshare=auto` if the VM runs in `server` mode.
+
+The `on` setting can be useful for quickly confirming that sharing works,
+as it will report a hard failure if anything is amiss. However, `auto` is
+recommended in production: on an operating system with address-space layout
+randomization, it is possible for some backends to (randomly) fail to map
+the share. Under the `auto` setting, they will proceed without sharing (and
+with higher resource usage, which may not be ideal), where with the `on`
+setting they would simply fail.
 
 *Note: the earliest documentation on class data sharing, dating to Java 1.5,
 suggested that the feature was not available at all in server mode. In recent
@@ -65,9 +137,10 @@ installed. It can be created with the simple command `java -Xshare:dump`
 
 ### Preloading PL/Java's classes as well as the Java runtime's
 
-The basic class data sharing feature includes only Java's own runtime
-classes in the shared archive. When using Java 8 from Oracle, 8u40 or
-later, an expanded feature called [application class data sharing][appcds]
+In Hotspot, the basic class data sharing feature includes only Java's own
+runtime classes in the shared archive. When using Java 8 from Oracle, 8u40 or
+later, or OpenJDK with Hotspot starting with Java 10, an expanded feature
+called [application class data sharing][appcds]
 is available, with which you can build a shared archive that preloads
 PL/Java's classes as well as Java's own. In rough terms this doubles the
 improvement in startup time seen with basic class data sharing alone,
@@ -75,10 +148,14 @@ for a total improvement (compared to no sharing) of 30 to 35 percent.
 It also allows the memory per backend to be even further
 scaled back, as discussed under "plausible settings" below.
 
+([In OpenJ9][cdsJ9], the basic class sharing feature since Java 8 already
+includes this ability, with no additional setup steps needed.)
+
 #### Licensing considerations
 
 Basic class data sharing is widely available with no restriction, but
-*application class data sharing* is a "commercial feature" exclusive to
+*application class data sharing* [in Oracle Java][orjava] is a
+"commercial feature" that first appeared in
 Oracle Java 8. It will not work unless `pljava.vmoptions` also contain
 `-XX:+UnlockCommercialFeatures` , with implications described in the
 "supplemental license terms" of the Oracle
@@ -89,14 +166,61 @@ negotiating an additional agreement with Oracle if the feature will be used
 purpose." It is available to consider for any application where the
 additional performance margin can be given a price.
 
-Looking ahead to Java 9, there are some promising signs that OpenJDK may have
-an equivalent feature.
+[In OpenJDK (with Hotspot)][OpenJDK], starting in Java 10, the same feature
+is available and set up in the same way, but is freely usable; it does not
+require any additional license, and does not require any
+`-XX:+UnlockCommercialFeatures` to be added to the options.
 
-Here are the [instructions for setting up application class data sharing][iads].
+Starting in Java 11, Oracle offers
+[Oracle-branded downloads of both "Oracle JDK" and "Oracle's OpenJDK builds"][o]
+that are "functionally identical aside from some cosmetic and packaging
+differences". "Oracle's OpenJDK builds" may be used for production or
+commercial purposes with no additional licensing, while any such use of
+"Oracle JDK" requires a commercial license. The application class data sharing
+feature is available in both, and no longer requires the
+`-XX:+UnlockCommercialFeatures` in either case (not in "Oracle's OpenJDK builds"
+because their use is unrestricted, and not in "Oracle JDK" because the
+"commercial feature" is now, effectively, the entire JDK).
 
+[In OpenJDK (with OpenJ9)][OpenJDK], the class-sharing feature present from
+Java 8 onward will naturally share PL/Java's classes as well as the Java
+runtime's, with no additional setup steps.
+
+Here are the instructions for
+[setting up application class data sharing in Hotspot][iads].
+
+Here are instructions for [setting up class sharing (including application
+classes!) in OpenJ9][cdsJ9].
+
+[orjava]: http://www.oracle.com/technetwork/java/javase/downloads/index.html
+[OpenJDK]: https://adoptopenjdk.net/
+[hsj9]: https://www.eclipse.org/openj9/oj9_faq.html
 [appcds]: http://docs.oracle.com/javase/8/docs/technotes/tools/unix/java.html#app_class_data_sharing
 [bcl]: http://www.oracle.com/technetwork/java/javase/terms/license/index.html
 [iads]: appcds.html
+[vmoptJ9]: oj9vmopt.html
+[cdsJ9]: oj9vmopt.html#How_to_set_up_class_sharing_in_OpenJ9
+[o]: https://blogs.oracle.com/java-platform-group/oracle-jdk-releases-for-java-11-and-later
+[cdsaot]: http://web.archive.org/web/20191020025455/https://blog.gilliard.lol/2017/10/04/AppCDS-and-Clojure.html
+
+## `-XX:AOTLibrary=`
+
+JDK 9 and later have included a tool, `jaotc`, that does ahead-of-time
+compilation of class files to native code, producing a shared-object file
+that can be named with the `-XX:AOTLibrary` option. Options to the `jaotc`
+command can specify which jars, modules, individual classes, or individual
+methods to compile and include. Optionally, `jaotc` can include additional
+metadata with the compiled code (at the cost of a slightly larger file),
+so that the Java runtime's tiered JIT compiler can still further optimize
+the compiled-in-advance methods that turn out to be hot spots.
+
+To make a library of manageable size, a list of touched classes and methods
+from a sample run can be made, much as described above for application class
+data sharing.
+
+A [blog post by Matthew Gilliard][cdsaot] reports successfully combining `jaotc`
+compilation and application class data sharing with good results, and goes into
+some detail on the preparation steps.
 
 ## `-XX:+DisableAttachMechanism`
 
@@ -157,6 +281,8 @@ The `G1` collector, favored as `ConcMarkSweep`'s replacement, uses slightly
 more space to work, while `Parallel` and `ParallelOld` will occupy more than
 double the space of any of these.
 
+[gcchoice]: https://docs.oracle.com/javase/8/docs/technotes/guides/vm/gctuning/collectors.html
+
 ### Plausible settings
 
 The optimal memory settings and garbage collector for a specific PL/Java
@@ -187,3 +313,11 @@ collection. In a test using PL/Java to do trivial work (nothing but
 `SELECT sqlj.get_classpath('public')`), the sweet spot comes around
 `-Xms5m` (which seems to end up allocating 6, but completes
 with no GC in my testing).
+
+### Performance tuning tips on the wiki
+
+Between releases of this documentation, breaking news, tips, and metrics
+on PL/Java performance tuning may be shared
+[on the performance-tuning wiki page][ptwp].
+
+[ptwp]: https://github.com/tada/pljava/wiki/Performance-tuning

@@ -1,153 +1,153 @@
 /*
- * Copyright (c) 2004, 2005, 2006 TADA AB - Taby Sweden
- * Portions Copyright (c) 2010 - Greenplum Inc
- * Distributed under the terms shown in the file COPYRIGHT
- * found in the root folder of this project or at
- * http://eng.tada.se/osprojects/COPYRIGHT.html
+ * Copyright (c) 2004-2025 Tada AB and other contributors, as listed below.
+ *
+ * All rights reserved. This program and the accompanying materials
+ * are made available under the terms of the The BSD 3-Clause License
+ * which accompanies this distribution, and is available at
+ * http://opensource.org/licenses/BSD-3-Clause
+ *
+ * Contributors:
+ *   Tada AB
+ *   Chapman Flack
  */
 package org.postgresql.pljava.sqlj;
 
 import java.io.File;
-import java.io.FileFilter;
 import java.io.IOException;
+import java.io.InputStream;
+
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
+import static java.lang.invoke.MethodType.methodType;
+
 import java.net.MalformedURLException;
 import java.net.URL;
+import java.net.URLClassLoader;
+
+import java.security.CodeSigner;
+import java.security.CodeSource;
+import java.security.Principal;
+import java.security.ProtectionDomain;
+
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLData;
 import java.sql.SQLException;
 import java.sql.Statement;
+
 import java.util.Collections;
 import java.util.Enumeration;
 import java.util.HashMap;
-import java.util.LinkedList;
-import java.util.ListIterator;
+import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.NoSuchElementException;
+import java.util.Set;
+
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
+import static java.util.stream.Collectors.groupingBy;
+
+import org.postgresql.pljava.sqlgen.Lexicals.Identifier;
+
 import org.postgresql.pljava.internal.Backend;
+import org.postgresql.pljava.internal.Checked;
 import org.postgresql.pljava.internal.Oid;
-import org.postgresql.pljava.jdbc.SQLUtils;
-import org.postgresql.pljava.sqlj.JarLoader;
+import static org.postgresql.pljava.internal.Privilege.doPrivileged;
+import static org.postgresql.pljava.internal.UncheckedException.unchecked;
+
+import org.postgresql.pljava.jdbc.Invocation;
+import static org.postgresql.pljava.jdbc.SQLUtils.getDefaultConnection;
+
+/*
+ * Import an interface (internal-only, at least for now) that allows overriding
+ * the default derivation of the read_only parameter to SPI query execution
+ * functions. The default behavior follows the recommendation in the SPI docs
+ * to use read_only => true if the currently-executing PL function is declared
+ * IMMUTABLE, and read_only => false otherwise.
+ *
+ * Several queries in this class will use this interface to force read_only to
+ * be false, even though the queries clearly do nothing but reading. The reason
+ * may not be obvious:
+ *
+ * One effect of the read_only parameter in SPI is the selection of the snapshot
+ * used to evaluate the query. When read_only is true, a snapshot from the
+ * beginning of the command is used, which cannot see even the modifications
+ * made in this transaction since that point.
+ *
+ * Where that becomes a problem is during evaluation of a deployment descriptor
+ * as part of install_jar or replace_jar. The command began by loading some new
+ * or changed classes, and is now executing deployment commands, which may very
+ * well need to load those classes. But some of the loading requests may happen
+ * to come through functions that are declared IMMUTABLE (type IO functions, for
+ * example), which, under the default behavior, would mean SPI gets passed
+ * read_only => true and selects a snapshot from before the new classes were
+ * there, and loading fails. That is why read_only is always forced false here.
+ */
+import org.postgresql.pljava.jdbc.SPIReadOnlyControl;
 
 /**
- *
- * The Loader class is used by PL/Java to load java bytecode into the VM.
- *
- * In the postgres distribution this bytecode is always loaded from the
- * sqlj.jar_repository table.
- *
- * In Greenplum that is difficult because it would require uniform access
- * to the sqlj.jar_repository table from every segment, which is currently
- * not well supported by our architecture.
- *
- * Instead we mostly use our own loader JarLoader() which reads a jarfile
- * from the filesystem.  Note that the security manager allows READING from
- * "$GPHOME/lib/postgresql/java/*.class" files, even in trusted mode, since
- * this is shared between all databases any user can theoretically see every
- * installed jar.
- *
- * Note: This creates a couple differences from the postgres implementation that
- * currently pull us further from the sql standard embedded java implementation.
- * Specifically:
- *   - We do not support per-database/per-schema CLASSPATH
- *   - CLASSPATH is instead set by a user GUC.
+ * Class loader to load from jars installed in the database with
+ * {@code SQLJ.INSTALL_JAR}.
+ * @author Thomas Hallgren
  */
 public class Loader extends ClassLoader
 {
-	private static final String PUBLIC_SCHEMA	= "public";
-	private static final Map	s_schemaLoaders = new HashMap();
-	private static final Map	s_typeMap		= new HashMap();
-	private final static Logger s_logger		= Logger.getLogger(Loader.class.getName());
-
-	/* Greeplum Additions */
-	private final LinkedList	m_jarloaders;
-	private final String[]		m_classpath;
-	// private final Map		m_filespace;  // Not yet supported
-	private static String		m_current_classpath;
+	private static final Logger s_logger =
+		Logger.getLogger(Loader.class.getName());
 
 	/**
-	 * Create a new Loader.
-	 * @param entries
-	 * @param parent
+	 * A distinguished singleton instance to serve as a type-safe "sentinel"
+	 * reference in context classloader management (as Java considers null to be
+	 * a meaningful {@code setContextClassLoader} argument).
 	 */
-	Loader(String classpath)
-	throws SQLException
+	public static final ClassLoader SENTINEL = new Loader();
+
+	/**
+	 * The enumeration of URLs returned by {@code findResources}.
+	 *<p>
+	 * The returned URLs have a "dbf:" scheme and expose the integer surrogate
+	 * keys of jar entries, not a very stable way to refer to an entry in a jar,
+	 * but perhaps adequate for now, as no one will be constructing such URLs
+	 * or obtaining them except from {@code findResources} here.
+	 */
+	static class EntryEnumeration implements Enumeration<URL>
 	{
-		super(Loader.class.getClassLoader());
+		private final int[] m_entryIds;
+		private int m_top = 0;
 
-		m_jarloaders = new LinkedList();
-
-		if (classpath == null || classpath.length() == 0)
-			m_classpath = new String[0];
-		else
-			m_classpath = classpath.split(":");
-
-		/* Find the directory that contains our jar files */
-		String jarpath = Backend.getLibraryPath() + "/java/";
-
-		/* Create a new JarLoader for every element in the classpath */
-		for (int i = 0; i < m_classpath.length; i++)
+		EntryEnumeration(int[] entryIds)
 		{
-			try
-			{
-				String searchPath;
+			m_entryIds = entryIds;
+		}
 
-				if (!m_classpath[i].startsWith("/"))
-				{
-					searchPath = jarpath + m_classpath[i];
-				}
-				else
-				{
-					searchPath = m_classpath[i];
-				}
-
-				URL url = null;
-
-				File tmp = new File(searchPath);
-
-				// if directory then lets get all the jar files
-				if (tmp.isDirectory()) {
-					File jarFiles[] = tmp.listFiles(new FileFilter() {
-						public boolean accept(File pathname) {
-							// not interested in directories
-							if (pathname.isDirectory()) return false;
-							// only interested in jar files
-							return pathname.getPath().endsWith("jar");
-						 }
-					});
-				 	for (int j=0; j<jarFiles.length;j++)
-					{
-						url = new URL("file:///"+jarFiles[j].getPath());
-						JarLoader loader = new JarLoader(this, url);
-						m_jarloaders.add(loader);
-					}
-				}
-				else
-				{
-					url = new URL("file:///" + searchPath);
-					JarLoader loader = new JarLoader(this, url);
-					m_jarloaders.add(loader);
-				}
-
-			}
-			catch (MalformedURLException e)
-			{	
-				// XXX - Ignore malformed URLs?
-				throw new SQLException("Malformed URL Exception: " +
-									   e.getMessage());
-			}
-			catch (IOException e)
-			{
-				// XXX - Ignore jar doesn't exist?
-				throw new SQLException("IOException reading jar: " +
-									   e.getMessage());
-			}
+		public boolean hasMoreElements()
+		{
+			return (m_top < m_entryIds.length);
+		}
+		
+		public URL nextElement()
+		throws NoSuchElementException
+		{
+			if (m_top >= m_entryIds.length)
+				throw new NoSuchElementException();
+			return entryURL(m_entryIds[m_top++]);
 		}
 	}
+	public static final Identifier.Simple PUBLIC_SCHEMA =
+		Identifier.Simple.fromCatalog("public");
+
+	private static final Map<Identifier.Simple, ClassLoader>
+		s_schemaLoaders = new HashMap<>();
+
+	private static final
+		Map<Identifier.Simple, Map<Oid, Class<? extends SQLData>>>
+			s_typeMap = new HashMap<>();
+
+	private static final Object s_fallbackLoaderLock = new Object();
+	private static volatile ClassLoader s_fallbackLoader;
 
 	/**
 	 * Removes all cached schema loaders, functions, and type maps. This
@@ -160,6 +160,163 @@ public class Loader extends ClassLoader
 		s_schemaLoaders.clear();
 		s_typeMap.clear();
 		Backend.clearFunctionCache();
+		s_fallbackLoader = null;
+	}
+
+	private static boolean isMissingSqlj(SQLException e)
+	{
+		for (SQLException ex = e; ex != null; ex = ex.getNextException())
+		{
+			String state = ex.getSQLState();
+			if ("42P01".equals(state) || "3F000".equals(state))
+				return true;
+		}
+		return false;
+	}
+
+	private static ClassLoader getFallbackLoader()
+	{
+		ClassLoader loader = s_fallbackLoader;
+		if ( loader != null )
+			return loader;
+
+		synchronized ( s_fallbackLoaderLock )
+		{
+			loader = s_fallbackLoader;
+			if ( loader != null )
+				return loader;
+
+			Set<URL> urls = new LinkedHashSet<>();
+			addPathUrls(safeGetConfigOption("pljava_classpath"), urls);
+			if ( urls.isEmpty() )
+				loader = ClassLoader.getSystemClassLoader();
+			else
+				loader = doPrivileged(() -> new FallbackClassLoader(
+					urls.toArray(new URL[0]),
+					ClassLoader.getSystemClassLoader()));
+			s_fallbackLoader = loader;
+			return loader;
+		}
+	}
+
+	private static final class FallbackClassLoader extends URLClassLoader
+	{
+		FallbackClassLoader(URL[] urls, ClassLoader parent)
+		{
+			super(urls, parent);
+		}
+
+		@Override
+		public URL getResource(String name)
+		{
+			return doPrivileged(() -> super.getResource(name));
+		}
+
+		@Override
+		public InputStream getResourceAsStream(String name)
+		{
+			return doPrivileged(() -> {
+				URL url = super.getResource(name);
+				if ( url == null )
+					return null;
+				try
+				{
+					return url.openStream();
+				}
+				catch ( IOException e )
+				{
+					return null;
+				}
+			});
+		}
+	}
+
+	private static String safeGetConfigOption(String key)
+	{
+		if ( key == null || key.trim().isEmpty() )
+			return null;
+
+		try ( PreparedStatement stmt = getDefaultConnection()
+			.prepareStatement(
+				"SELECT pg_catalog.current_setting(?, true)") )
+		{
+			stmt.unwrap(SPIReadOnlyControl.class).clearReadOnly();
+			stmt.setString(1, key);
+			try ( ResultSet rs = stmt.executeQuery() )
+			{
+				if ( rs.next() )
+					return rs.getString(1);
+			}
+			return null;
+		}
+		catch ( SQLException e )
+		{
+			throw unchecked(e);
+		}
+	}
+
+	private static void addPathUrls(String path, Set<URL> urls)
+	{
+		if ( path == null || path.trim().isEmpty() )
+			return;
+
+		String[] parts =
+			path.split(java.util.regex.Pattern.quote(File.pathSeparator));
+		for ( String part : parts )
+		{
+			String entry = part.trim();
+			if ( entry.isEmpty() )
+				continue;
+			File file = new File(entry);
+			try
+			{
+				if ( file.isDirectory() )
+				{
+					urls.add(file.toURI().toURL());
+					File[] jarFiles = file.listFiles((dir, name) ->
+						name.endsWith(".jar"));
+					if ( jarFiles == null )
+						continue;
+					for ( File jar : jarFiles )
+						urls.add(jar.toURI().toURL());
+				}
+				else if ( file.isFile() )
+				{
+					urls.add(file.toURI().toURL());
+				}
+			}
+			catch ( MalformedURLException e )
+			{
+				throw unchecked(e);
+			}
+		}
+	}
+
+	private static boolean sqljTablesExist(Connection conn)
+	throws SQLException
+	{
+		return sqljTableExists(conn, "jar_repository")
+			&& sqljTableExists(conn, "classpath_entry")
+			&& sqljTableExists(conn, "jar_entry");
+	}
+
+	private static boolean sqljTableExists(Connection conn, String tableName)
+	throws SQLException
+	{
+		try ( PreparedStatement stmt = conn.prepareStatement(
+			"SELECT 1 FROM pg_catalog.pg_class c " +
+			"JOIN pg_catalog.pg_namespace n " +
+			"ON n.oid OPERATOR(pg_catalog.=) c.relnamespace " +
+			"WHERE n.nspname OPERATOR(pg_catalog.=) 'sqlj' " +
+			"AND c.relname OPERATOR(pg_catalog.=) ?"))
+		{
+			stmt.unwrap(SPIReadOnlyControl.class).clearReadOnly();
+			stmt.setString(1, tableName);
+			try ( ResultSet rs = stmt.executeQuery() )
+			{
+				return rs.next();
+			}
+		}
 	}
 
 	/**
@@ -171,42 +328,150 @@ public class Loader extends ClassLoader
 	public static ClassLoader getCurrentLoader()
 	throws SQLException
 	{
-		/*
-		 * Because Greenplum doesn't support per-schema classpaths we just map
-		 * everything to the public schema.
-		 */
-		return getSchemaLoader(PUBLIC_SCHEMA);
+		String schema;
+		try (
+			Statement stmt = getDefaultConnection().createStatement();
+			ResultSet rs =
+				stmt.executeQuery("SELECT pg_catalog.current_schema()");
+		)
+		{
+			if(!rs.next())
+				throw new SQLException("Unable to determine current schema");
+			schema = rs.getString(1);
+		}
+		return getSchemaLoader(Identifier.Simple.fromCatalog(schema));
 	}
 
 	/**
 	 * Obtain a loader that has been configured for the class path of the
 	 * schema named <code>schemaName</code>. Class paths are defined using the
 	 * SQL procedure <code>sqlj.set_classpath</code>.
-	 * @param schemaName The name of the schema.
+	 * @param schema The name of the schema as an Identifier.Simple.
 	 * @return A loader.
 	 */
-	public static ClassLoader getSchemaLoader(String schemaName)
+	public static ClassLoader getSchemaLoader(Identifier.Simple schema)
 	throws SQLException
 	{
-		/*
-		 * Rather than having a different loader per schemaName, instead
-		 * we simply create a different loader per CLASSPATH.
-		 */
-		String classpath = Backend.getConfigOption("pljava_classpath");
-		if (classpath == null)
-			classpath = "";
-		if (!classpath.equals(m_current_classpath))
+		if(schema == null )
+			schema = PUBLIC_SCHEMA;
+
+		ClassLoader loader = s_schemaLoaders.get(schema);
+		if(loader != null)
 		{
-			clearSchemaLoaders();
-			m_current_classpath = classpath;
+			if ( loader instanceof Loader )
+			{
+				Connection conn = getDefaultConnection();
+				if ( sqljTablesExist(conn) )
+					return loader;
+				s_schemaLoaders.remove(schema);
+			}
+			else
+				return loader;
 		}
 
-		ClassLoader loader = (ClassLoader) s_schemaLoaders.get(classpath);
-		if (loader == null)
+		/*
+		 * Under-construction map from an entry name to an array of integer
+		 * surrogate keys for entries with matching names in jars on the path.
+		 */
+		Map<String,int[]> classImages = new HashMap<>();
+
+		/*
+		 * Under-construction map from an integer entry key to a
+		 * CodeSource representing the jar it belongs to.
+		 */
+		Map<Integer,CodeSource> codeSources = new HashMap<>();
+
+		Connection conn = getDefaultConnection();
+		if ( ! sqljTablesExist(conn) )
 		{
-			loader = (ClassLoader) new Loader(classpath);
-			s_schemaLoaders.put(classpath, loader);
+			loader = getFallbackLoader();
+			s_schemaLoaders.put(schema, loader);
+			return loader;
 		}
+		try (
+			// Read the entries so that the one with highest prio is read last.
+			//
+			PreparedStatement outer = conn.prepareStatement(
+				"SELECT r.jarId, r.jarName" +
+				" FROM" +
+				"  sqlj.jar_repository r" +
+				"  INNER JOIN sqlj.classpath_entry c" +
+				"  ON r.jarId OPERATOR(pg_catalog.=) c.jarId" +
+				" WHERE c.schemaName OPERATOR(pg_catalog.=) ?" +
+				" ORDER BY c.ordinal DESC");
+			PreparedStatement inner = conn.prepareStatement(
+				"SELECT entryId, entryName FROM sqlj.jar_entry " +
+				"WHERE jarId OPERATOR(pg_catalog.=) ?");
+		)
+		{
+			outer.unwrap(SPIReadOnlyControl.class).clearReadOnly();
+			inner.unwrap(SPIReadOnlyControl.class).clearReadOnly();
+			outer.setString(1, schema.pgFolded());
+			try ( ResultSet rs = outer.executeQuery() )
+			{
+				while(rs.next())
+				{
+					@SuppressWarnings("deprecation") // until PL/Java major rev
+					URL jarUrl = new URL("sqlj:" + rs.getString(2));
+					CodeSource cs = new CodeSource(jarUrl, (CodeSigner[])null);
+
+					inner.setInt(1, rs.getInt(1));
+					try ( ResultSet rs2 = inner.executeQuery() )
+					{
+						while(rs2.next())
+						{
+							int entryId = rs2.getInt(1);
+							String entryName = rs2.getString(2);
+							codeSources.put(entryId, cs);
+							int[] oldEntry = classImages.get(entryName);
+							if(oldEntry == null)
+								classImages.put(entryName, new int[] { entryId });
+							else
+							{
+								int last = oldEntry.length;
+								int[] newEntry = new int[last + 1];
+								newEntry[0] = entryId;
+								System.arraycopy(oldEntry, 0, newEntry, 1, last);
+								classImages.put(entryName, newEntry);
+							}
+						}
+					}
+				}
+			}
+			catch ( MalformedURLException e )
+			{
+				throw unchecked(e);
+			}
+		}
+		catch (SQLException e)
+		{
+			if (isMissingSqlj(e))
+			{
+				Invocation.clearErrorCondition();
+				loader = getFallbackLoader();
+				s_schemaLoaders.put(schema, loader);
+				return loader;
+			}
+			throw e;
+		}
+
+		ClassLoader parent = ClassLoader.getSystemClassLoader();
+		if(classImages.size() == 0)
+			//
+			// No classpath defined for the schema. Default to
+			// classpath of public schema or to the fallback loader if the
+			// request already is for the public schema.
+			//
+			loader = schema.equals(PUBLIC_SCHEMA)
+				? getFallbackLoader() : getSchemaLoader(PUBLIC_SCHEMA);
+		else
+		{
+			String name = "schema:" + schema.nonFolded();
+			loader = doPrivileged(() ->
+				new Loader(classImages, codeSources, parent, name));
+		}
+
+		s_schemaLoaders.put(schema, loader);
 		return loader;
 	}
 
@@ -219,43 +484,380 @@ public class Loader extends ClassLoader
 	 * @param schema The schema
 	 * @return The Map, possibly empty but never <code>null</code>.
 	 */
-	public static Map getTypeMap(final String schema) throws SQLException
+	public static Map<Oid,Class<? extends SQLData>> getTypeMap(
+		final Identifier.Simple schema)
+		throws SQLException
 	{
-		/* XXX - needs implementation to support TypeMaps */
-		return Collections.EMPTY_MAP;
+		Map<Oid,Class<? extends SQLData>> typesForSchema =
+			s_typeMap.get(schema);
+		if(typesForSchema != null)
+			return typesForSchema;
+
+		s_logger.finer("Creating typeMappings for schema " + schema);
+		typesForSchema = new HashMap<Oid,Class<? extends SQLData>>()
+		{
+			public Class<? extends SQLData> get(Oid key)
+			{
+				s_logger.finer("Obtaining type mapping for OID " + key +
+					" for schema " + schema);
+				return super.get(key);
+			}
+		};
+		ClassLoader loader = Loader.getSchemaLoader(schema);
+		try (
+			Statement stmt = Checked.Supplier.use((() ->
+			{
+				Statement s = getDefaultConnection().createStatement();
+				s.unwrap(SPIReadOnlyControl.class).clearReadOnly();
+				return s;
+			})).get();
+			ResultSet rs = stmt.executeQuery(
+				"SELECT javaName, sqlName FROM sqlj.typemap_entry");
+		)
+		{
+			while(rs.next())
+			{
+				try
+				{
+					String javaClassName = rs.getString(1);
+					String sqlName = rs.getString(2);
+					Class<?> cls = loader.loadClass(javaClassName);
+					if(!SQLData.class.isAssignableFrom(cls))
+						throw new SQLException("Class " + javaClassName +
+							" does not implement java.sql.SQLData");
+					
+					Oid typeOid = Oid.forTypeName(sqlName);
+					typesForSchema.put(typeOid, cls.asSubclass(SQLData.class));
+					s_logger.finer("Adding type mapping for OID " + typeOid +
+						" -> class " + cls.getName() + " for schema " + schema);
+				}
+				catch(ClassNotFoundException e)
+				{
+					// Ignore, type is not know to this schema and that is ok
+				}
+			}
+			if(typesForSchema.isEmpty())
+				typesForSchema = Map.of();
+			s_typeMap.put(schema, typesForSchema);
+			return typesForSchema;
+		}
+		catch (SQLException e)
+		{
+			if (isMissingSqlj(e))
+			{
+				Invocation.clearErrorCondition();
+				typesForSchema = Map.of();
+				s_typeMap.put(schema, typesForSchema);
+				return typesForSchema;
+			}
+			throw e;
+		}
 	}
 
-	protected Class findClass(final String name)
+	private static URL entryURL(int entryId)
+	{
+		try
+		{
+			@SuppressWarnings("deprecation") // Java >= 20: URL.of(uri,handler)
+			URL u = doPrivileged(() -> new URL(
+					"dbf",
+					"localhost",
+					-1,
+					"/" + entryId,
+					EntryStreamHandler.getInstance()));
+			return u;
+		}
+		catch(MalformedURLException e)
+		{
+			throw unchecked(e);
+		}
+	}
+
+	/**
+	 * Map from name of entry (resource or expanded class name) to an array of
+	 * the integer surrogate keys for jar entries, in the order of jars on this
+	 * loader's jar path that contain entries matching the name.
+	 */
+	private final Map<String,int[]> m_entries;
+	private final Map<Integer,ProtectionDomain> m_domains;
+
+	/**
+	 * Private constructor used only to create the "sentinel" (non-)loader.
+	 *<p>
+	 * Any attempt to use it will incur null pointer exceptions, but it would be
+	 * a bug already for such use to be attempted.
+	 */
+	private Loader()
+	{
+		m_entries  = null;
+		m_domains  = null;
+		m_j9Helper = null;
+	}
+
+	/**
+	 * Create a new Loader.
+	 * @param entries
+	 * @param parent
+	 */
+	Loader(
+		Map<String,int[]> entries,
+		Map<Integer,CodeSource> sources, ClassLoader parent, String name)
+	{
+		super(name, parent);
+		m_entries = entries;
+		m_j9Helper = ifJ9getHelper(); // null if not under OpenJ9 with sharing
+
+		Principal[] noPrincipals = new Principal[0];
+
+		m_domains = new HashMap<>();
+
+		sources.entrySet().stream()
+			.collect(groupingBy(Map.Entry::getValue))
+			.entrySet().stream().forEach(e ->
+			{
+				ProtectionDomain pd = new ProtectionDomain(
+					e.getKey(), null /* no permissions */, this, noPrincipals);
+				e.getValue().forEach(ee -> m_domains.put(ee.getKey(), pd));
+			});
+	}
+
+	@Override
+	protected Class<?> findClass(final String name)
 	throws ClassNotFoundException
 	{
-		// Scan through all jar files in the classpath
-		for (ListIterator iter = m_jarloaders.listIterator(); iter.hasNext(); )
+		String path = name.replace('.', '/').concat(".class");
+		int[] entryId = m_entries.get(path);
+		if(entryId != null)
 		{
-			JarLoader loader = (JarLoader) iter.next();
-			try
+			ProtectionDomain pd = m_domains.get(entryId[0]);
+
+			/*
+			 * Check early whether running on OpenJ9 JVM and the shared cache
+			 * has the class. It is possible this early because the entryId is
+			 * being used to generate the token, and it is known before even
+			 * doing the jar_entry query. It would be possible to use something
+			 * like the row's xmin instead, in which case this test would have
+			 * to be moved after retrieving the row.
+			 *
+			 * ifJ9findSharedClass can only return a byte[], a String, or null.
+			 */
+			Object o = ifJ9findSharedClass(name, entryId[0]);
+			if ( o instanceof byte[] )
 			{
-				Class r = loader.findClass(name);
-				if (r != null)
-					return r;
+				byte[] img = (byte[]) o;
+				return defineClass(name, img, 0, img.length, pd);
 			}
-   			catch (ClassNotFoundException e)
+			String ifJ9token = (String) o; // used below when storing class
+
+			try (
+				// This code relies heavily on the fact that the connection
+				// is a singleton and that the prepared statement will live
+				// for the duration of the loader. (This comment has said so
+				// since January 2004; the prepared statement has been getting
+				// closed in a finally block since November 2004, and that
+				// hasn't broken anything, and it is currently true that
+				// prepared statements are backed by ExecutionPlans that stick
+				// around in an MRU cache after being closed.)
+				//
+				PreparedStatement stmt = Checked.Supplier.use((() ->
+					{
+						PreparedStatement s = getDefaultConnection()
+							.prepareStatement(
+								"SELECT entryImage FROM sqlj.jar_entry " +
+								"WHERE entryId OPERATOR(pg_catalog.=) ?");
+						s.unwrap(SPIReadOnlyControl.class).clearReadOnly();
+						s.setInt(1, entryId[0]);
+						return s;
+					})).get();
+				ResultSet rs = stmt.executeQuery();
+			)
 			{
-				// Ignore exception, look in other loaders (JAR files)
+				if(rs.next())
+				{
+					byte[] img = rs.getBytes(1);
+
+					Class<?> cls = defineClass(name, img, 0, img.length, pd);
+
+					ifJ9storeSharedClass(ifJ9token, cls); // noop for null token
+					return cls;
+				}
+			}
+			catch(SQLException e)
+			{
+				Invocation.clearErrorCondition();
+				Logger.getAnonymousLogger().log(Level.INFO,
+					"Failed to load class", e);
+				throw new ClassNotFoundException(name + " due to: " +
+					e.getMessage(), e);
 			}
 		}
 		throw new ClassNotFoundException(name);
 	}
 
+	@Override
 	protected URL findResource(String name)
 	{
-		// Scan through all jar files in the classpath
-		for (ListIterator iter = m_jarloaders.listIterator(); iter.hasNext();)
+		int[] entryIds = m_entries.get(name);
+		if(entryIds == null)
+			return null;
+		
+		return entryURL(entryIds[0]);
+	}
+
+	@Override
+	protected Enumeration<URL> findResources(String name)
+    throws IOException
+	{
+		int[] entryIds = m_entries.get(name);
+		if(entryIds == null)
+			entryIds = new int[0];
+		return new EntryEnumeration(entryIds);
+	}
+
+	/*
+	 * Detect and integrate with the OpenJ9 JVM class sharing facility.
+	 * https://www.ibm.com/developerworks/library/j-class-sharing-openj9/#usingthehelperapi
+	 * https://github.com/eclipse/openj9/blob/master/jcl/src/openj9.sharedclasses/share/classes/com/ibm/oti/shared/
+	 */
+
+	private static final Object s_j9HelperFactory;
+	private static final MethodHandle s_j9GetTokenHelper;
+	private static final MethodHandle s_j9FindSharedClass;
+	private static final MethodHandle s_j9StoreSharedClass;
+	private final Object m_j9Helper;
+
+	/**
+	 * Return an OpenJ9 {@code SharedClassTokenHelper} if running on an OpenJ9
+	 * JVM with sharing enabled; otherwise return null.
+	 */
+	private Object ifJ9getHelper()
+	{
+		if ( null == s_j9HelperFactory )
+			return null;
+		try
 		{
-			JarLoader loader = (JarLoader) iter.next();
-			URL url = loader.findResource(name);
-			if (url != null)
-				return url;
+			return s_j9GetTokenHelper.invoke(s_j9HelperFactory, this);
 		}
-		return null;
+		catch ( Throwable t )
+		{
+			throw unchecked(t);
+		}
+	}
+
+	/**
+	 * Find a class definition in the OpenJ9 shared cache (if running under
+	 * OpenJ9, and sharing is enabled, and the class is there).
+	 * @param className name of the class to seek.
+	 * @param tokenSource something passed by the caller from which we can
+	 * generate a token that is sure to be different if the class has been
+	 * updated. For now, just the int entryId, which is sufficient because that
+	 * is a SERIAL column and entries are deleted/reinserted by replace_jar.
+	 * There is just the one caller, so the type and usage of this parameter can
+	 * be changed to whatever is appropriate should the schema evolve.
+	 * @return null if not running under J9 with sharing; a {@code byte[]} if
+	 * the class is found in the shared cache, or a {@code String} token that
+	 * should be passed to {@code ifJ9storeSharedClass} later.
+	 */
+	private Object ifJ9findSharedClass(String className, int tokenSource)
+	{
+		if ( null == m_j9Helper )
+			return null;
+
+		String token = Integer.toString(tokenSource);
+
+		try
+		{
+			byte[] cookie = (byte[])
+				s_j9FindSharedClass.invoke(m_j9Helper, token, className);
+			if ( null == cookie )
+				return token;
+			return cookie;
+		}
+		catch ( Throwable t )
+		{
+			throw unchecked(t);
+		}
+	}
+
+	/**
+	 * Store a newly-defined class in the OpenJ9 shared class cache if running
+	 * under OpenJ9 with sharing enabled (implied if {@code token} is non-null,
+	 * per the convention that its value came from {@code ifJ9findSharedClass}).
+	 * @param token A token generated by {@code ifJ9findSharedClass}, non-null
+	 * only if J9 sharing is active and the class is not already cached. This
+	 * method is a noop if {@code token} is null.
+	 * @param cls The newly-defined class.
+	 */
+	private void ifJ9storeSharedClass(String token, Class<?> cls)
+	{
+		if ( null == token )
+			return;
+		assert(null != m_j9Helper);
+
+		try
+		{
+			s_j9StoreSharedClass.invoke(m_j9Helper, token, cls);
+		}
+		catch ( Throwable t )
+		{
+			throw unchecked(t);
+		}
+	}
+
+	/*
+	 * Detect if this is an OpenJ9 JVM with sharing enabled, setting the related
+	 * static fields for later reflective access to its sharing helpers if so.
+	 */
+	static
+	{
+		Object factory = null;
+		MethodHandle getHelper = null;
+		MethodHandle findShared = null;
+		MethodHandle storeShared = null;
+
+		try
+		{
+			/* If this throws ClassNotFoundException, the JVM isn't OpenJ9. */
+			Class<?> shared = ClassLoader.getSystemClassLoader().loadClass(
+				"com.ibm.oti.shared.Shared");
+
+			MethodHandles.Lookup lup = MethodHandles.publicLookup();
+
+			MethodHandle getFactory = lup.unreflect(shared.getMethod(
+				"getSharedClassHelperFactory", (Class<?>[])null));
+
+			/* If getFactory returns null, sharing is not enabled. */
+			factory = getFactory.invoke();
+			if ( null != factory )
+			{
+				Class<?> factoryClass = getFactory.type().returnType();
+				getHelper = lup.unreflect(
+					factoryClass.getMethod("getTokenHelper",ClassLoader.class));
+				Class<?> helperClass = getHelper.type().returnType();
+				findShared = lup.findVirtual(helperClass, "findSharedClass",
+					methodType(byte[].class, String.class, String.class));
+				storeShared = lup.findVirtual(helperClass, "storeSharedClass",
+					methodType(boolean.class, String.class, Class.class));
+			}
+		}
+		catch ( ClassNotFoundException cnfe )
+		{
+			/* Not running on an OpenJ9 JVM. Leave all the statics null. */
+		}
+		catch ( Error | RuntimeException e )
+		{
+			throw e;
+		}
+		catch ( Throwable t )
+		{
+			throw new ExceptionInInitializerError(t);
+		}
+		finally
+		{
+			s_j9HelperFactory = factory;
+			s_j9GetTokenHelper = getHelper;
+			s_j9FindSharedClass = findShared;
+			s_j9StoreSharedClass = storeShared;
+		}
 	}
 }

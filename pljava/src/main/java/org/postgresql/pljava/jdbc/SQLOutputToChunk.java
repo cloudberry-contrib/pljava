@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2004-2016 TADA AB and other contributors, as listed below.
+ * Copyright (c) 2004-2025 TADA AB and other contributors, as listed below.
  *
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the The BSD 3-Clause License
@@ -17,13 +17,11 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.Reader;
 import java.io.StringWriter;
-import java.io.UnsupportedEncodingException;
 import java.math.BigDecimal;
 import java.nio.BufferOverflowException;
 import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
 import java.nio.CharBuffer;
-import java.nio.charset.Charset;
+import static java.nio.charset.StandardCharsets.UTF_8;
 import java.nio.charset.CharsetEncoder;
 import java.nio.charset.CoderResult;
 import java.nio.charset.MalformedInputException;
@@ -47,7 +45,10 @@ import java.sql.Struct;
 import java.sql.Time;
 import java.sql.Timestamp;
 
-import org.postgresql.pljava.internal.Backend;
+import static org.postgresql.pljava.internal.Backend.doInPG;
+
+import static org.postgresql.pljava.jdbc.SQLChunkIOOrder.MIRROR_J2P;
+import static org.postgresql.pljava.jdbc.SQLChunkIOOrder.SCALAR_J2P;
 
 /**
  * The SQLOutputToChunk uses JNI to build a PostgreSQL StringInfo buffer in
@@ -64,52 +65,15 @@ public class SQLOutputToChunk implements SQLOutput
 {
 	private static final byte[] s_byteBuffer = new byte[8];
 
-	/* get rid of this once no longer supporting back to Java 6 */
-	private static final Charset UTF8 = Charset.forName("UTF-8");
-
 	private long m_handle;
 	private ByteBuffer m_bb;
-
-	private static ByteOrder scalarOrder;
-	private static ByteOrder mirrorOrder;
 
 	public SQLOutputToChunk(long handle, ByteBuffer bb,
 		boolean isJavaBasedScalar)
 		throws SQLException
 	{
 		m_handle = handle;
-		m_bb = bb;
-		if ( isJavaBasedScalar )
-		{
-			if ( null == scalarOrder )
-				scalarOrder = getOrder(true);
-			m_bb.order(scalarOrder);
-		}
-		else
-		{
-			if ( null == mirrorOrder )
-				mirrorOrder = getOrder(false);
-			m_bb.order(mirrorOrder);
-		}
-	}
-
-	private ByteOrder getOrder(boolean isJavaBasedScalar) throws SQLException
-	{
-		ByteOrder result;
-		String key = "org.postgresql.pljava.udt.byteorder."
-			+ ( isJavaBasedScalar ? "scalar" : "mirror" ) + ".j2p";
-		String val = System.getProperty(key);
-		if ( "big_endian".equals(val) )
-			result = ByteOrder.BIG_ENDIAN;
-		else if ( "little_endian".equals(val) )
-			result = ByteOrder.LITTLE_ENDIAN;
-		else if ( "native".equals(val) )
-			result = ByteOrder.nativeOrder();
-		else
-			throw new SQLNonTransientException(
-				"System property " + key +
-				" must be big_endian, little_endian, or native", "F0000");
-		return result;
+		m_bb = bb.order(isJavaBasedScalar ? SCALAR_J2P : MIRROR_J2P);
 	}
 
 	@Override
@@ -193,7 +157,7 @@ public class SQLOutputToChunk implements SQLOutput
 	{
 		ByteBuffer bb = ByteBuffer.allocate(65535);
 		CharBuffer cb = CharBuffer.allocate(1024);
-		CharsetEncoder enc = UTF8.newEncoder();
+		CharsetEncoder enc = UTF_8.newEncoder();
 		CoderResult cr;
 
 		try
@@ -331,7 +295,7 @@ public class SQLOutputToChunk implements SQLOutput
 		CharBuffer cb = CharBuffer.wrap(value);
 		try
 		{
-			CharsetEncoder enc = UTF8.newEncoder();
+			CharsetEncoder enc = UTF_8.newEncoder();
 			ByteBuffer bb = enc.encode(cb);
 			int len = bb.limit();
 			if ( 65535 < len )
@@ -490,7 +454,7 @@ public class SQLOutputToChunk implements SQLOutput
 
 	private void ensureCapacity(int c) throws SQLException
 	{
-		synchronized(Backend.THREADLOCK)
+		doInPG(() ->
 		{
 			if(m_handle == 0)
 				throw new SQLException("Stream is closed");
@@ -498,7 +462,7 @@ public class SQLOutputToChunk implements SQLOutput
 			m_bb = _ensureCapacity(m_handle, m_bb, m_bb.position(), c);
 			if ( m_bb != oldbb )
 				m_bb.order(oldbb.order());
-		}
+		});
 	}
 
 	private static native ByteBuffer _ensureCapacity(long handle,

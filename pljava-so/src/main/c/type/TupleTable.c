@@ -1,10 +1,14 @@
 /*
- * Copyright (c) 2004, 2005, 2006 TADA AB - Taby Sweden
- * Distributed under the terms shown in the file COPYRIGHT
- * found in the root folder of this project or at
- * http://eng.tada.se/osprojects/COPYRIGHT.html
+ * Copyright (c) 2004-2020 Tada AB and other contributors, as listed below.
  *
- * @author Thomas Hallgren
+ * All rights reserved. This program and the accompanying materials
+ * are made available under the terms of the The BSD 3-Clause License
+ * which accompanies this distribution, and is available at
+ * http://opensource.org/licenses/BSD-3-Clause
+ *
+ * Contributors:
+ *   Tada AB
+ *   Chapman Flack
  */
 #include <postgres.h>
 #include <executor/spi.h>
@@ -15,7 +19,9 @@
 #include "pljava/type/Tuple.h"
 #include "pljava/type/TupleDesc.h"
 
-#define pg_unreachable() abort()
+#if PG_VERSION_NUM < 120000
+#define ExecCopySlotHeapTuple(tts) ExecCopySlotTuple((tts))
+#endif
 
 static jclass    s_TupleTable_class;
 static jmethodID s_TupleTable_init;
@@ -32,9 +38,9 @@ jobject TupleTable_createFromSlot(TupleTableSlot* tts)
 
 	curr = MemoryContextSwitchTo(JavaMemoryContext);
 
-	tupdesc = TupleDesc_internalCreate(tts->tts_tupleDescriptor);
+	tupdesc = pljava_TupleDesc_internalCreate(tts->tts_tupleDescriptor);
 	tuple   = ExecCopySlotHeapTuple(tts);
-	tuples  = Tuple_createArray(&tuple, 1, false);
+	tuples  = pljava_Tuple_createArray(&tuple, 1, false);
 
 	MemoryContextSwitchTo(curr);
 
@@ -44,23 +50,29 @@ jobject TupleTable_createFromSlot(TupleTableSlot* tts)
 jobject TupleTable_create(SPITupleTable* tts, jobject knownTD)
 {
 	jobjectArray tuples;
+	uint64 tupcount;
 	MemoryContext curr;
 
 	if(tts == 0)
 		return 0;
 
+#if PG_VERSION_NUM < 130000
+	tupcount = tts->alloced - tts->free;
+#else
+	tupcount = tts->numvals;
+#endif
+	if ( tupcount > PG_INT32_MAX )
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("a PL/Java TupleTable cannot represent more than "
+					"INT32_MAX rows")));
+
 	curr = MemoryContextSwitchTo(JavaMemoryContext);
 
 	if(knownTD == 0)
-		knownTD = TupleDesc_internalCreate(tts->tupdesc);
+		knownTD = pljava_TupleDesc_internalCreate(tts->tupdesc);
 
-	uint64 tupcount;
-	#if PG_VERSION_NUM < 130000
-		tupcount = tts->alloced - tts->free;
-	#else
-		tupcount = tts->numvals;
-	#endif
-	tuples = Tuple_createArray(tts->vals, (jint)tupcount, true);
+	tuples = pljava_Tuple_createArray(tts->vals, (jint)tupcount, true);
 	MemoryContextSwitchTo(curr);
 
 	return JNI_newObject(s_TupleTable_class, s_TupleTable_init, knownTD, tuples);

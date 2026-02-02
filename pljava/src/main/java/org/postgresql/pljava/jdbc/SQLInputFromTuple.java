@@ -1,10 +1,14 @@
 /*
- * Copyright (c) 2004, 2005, 2006 TADA AB - Taby Sweden
- * Copyright (c) 2010, 2011 PostgreSQL Global Development Group
+ * Copyright (c) 2004-2019 Tada AB and other contributors, as listed below.
  *
- * Distributed under the terms shown in the file COPYRIGHT
- * found in the root folder of this project or at
- * http://wiki.tada.se/index.php?title=PLJava_License
+ * All rights reserved. This program and the accompanying materials
+ * are made available under the terms of the The BSD 3-Clause License
+ * which accompanies this distribution, and is available at
+ * http://opensource.org/licenses/BSD-3-Clause
+ *
+ * Contributors:
+ *   Tada AB
+ *   Chapman Flack
  */
 package org.postgresql.pljava.jdbc;
 
@@ -21,233 +25,328 @@ import java.sql.Ref;
 import java.sql.RowId;
 import java.sql.SQLException;
 import java.sql.SQLFeatureNotSupportedException;
-import java.sql.SQLFeatureNotSupportedException;
+import java.sql.SQLNonTransientException;
 import java.sql.SQLInput;
 import java.sql.SQLXML;
 import java.sql.Time;
 import java.sql.Timestamp;
 
 import org.postgresql.pljava.internal.Backend;
-import org.postgresql.pljava.internal.JavaWrapper;
+import org.postgresql.pljava.internal.DualState;
 import org.postgresql.pljava.internal.TupleDesc;
 
 /**
- * A single row, updateable ResultSet specially made for triggers. The
- * changes made to this ResultSet are remembered and converted to a
- * SPI_modify_tuple call prior to function return.
+ * Implements the {@code SQLInput} interface for a user-defined type (UDT)
+ * implemented in Java, for the case where a composite type in PostgreSQL is
+ * used as the UDT's representation, so it can be accessed as a PG tuple.
  *
  * @author Thomas Hallgren
  */
-public class SQLInputFromTuple extends JavaWrapper implements SQLInput
+public class SQLInputFromTuple extends SingleRowReader implements SQLInput
 {
 	private int m_index;
-	private final TupleDesc m_tupleDesc;
-	private boolean m_wasNull;
+	private final int m_columns;
 
-	public SQLInputFromTuple(long heapTupleHeaderPointer, TupleDesc tupleDesc)
+	/**
+	 * Construct an instance, given the (native) pointer to a PG
+	 * {@code HeapTupleHeader}, as well as the TupleDesc (Java object this time)
+	 * describing its structure.
+	 */
+	public SQLInputFromTuple(DualState.Key cookie, long resourceOwner,
+		long heapTupleHeaderPointer, TupleDesc tupleDesc)
 	throws SQLException
 	{
-		super(heapTupleHeaderPointer);
-		m_tupleDesc = tupleDesc;
-		m_index   = 0;
-		m_wasNull = false;
+		super(cookie, resourceOwner, heapTupleHeaderPointer, tupleDesc);
+		m_index = 0;
+		m_columns = tupleDesc.size();
 	}
 
+	protected int nextIndex() throws SQLException
+	{
+		if ( m_index >= m_columns )
+			throw new SQLNonTransientException("Tuple has no more columns");
+		return ++m_index;
+	}
+
+	/**
+	 * Implemented over {@link #readValue}.
+	 */
+	@Override
 	public Array readArray() throws SQLException
 	{
-		return (Array)this.readValue(Array.class);
+		return readValue(Array.class);
 	}
 
+	/**
+	 * Implemented over {@link #readClob}.
+	 */
+	@Override
 	public InputStream readAsciiStream() throws SQLException
 	{
-		Clob c = this.readClob();
+		Clob c = readClob();
 		return (c == null) ? null : c.getAsciiStream();
 	}
 
+	/**
+	 * Implemented over {@link #readValue}.
+	 */
+	@Override
 	public BigDecimal readBigDecimal() throws SQLException
 	{
-		return (BigDecimal)this.readValue(BigDecimal.class);
+		return readValue(BigDecimal.class);
 	}
 
+	/**
+	 * Implemented over {@link #readBlob}.
+	 */
+	@Override
 	public InputStream readBinaryStream() throws SQLException
 	{
-		Blob b = this.readBlob();
+		Blob b = readBlob();
 		return (b == null) ? null : b.getBinaryStream();
 	}
 
+	/**
+	 * Implemented over {@link #readBytes}.
+	 */
+	@Override
 	public Blob readBlob() throws SQLException
 	{
-		byte[] bytes = this.readBytes();
+		byte[] bytes = readBytes();
 		return (bytes == null) ? null :  new BlobValue(bytes);
 	}
 
+	/**
+	 * Implemented over {@link #readValue}.
+	 */
+	@Override
 	public boolean readBoolean() throws SQLException
 	{
-		Boolean b = (Boolean)this.readValue(Boolean.class);
+		Boolean b = readValue(Boolean.class);
 		return (b == null) ? false : b.booleanValue();
 	}
 
+	/**
+	 * Implemented over {@link #readNumber}.
+	 */
+	@Override
 	public byte readByte() throws SQLException
 	{
-		Number b = this.readNumber(byte.class);
+		Number b = readNumber(byte.class);
 		return (b == null) ? 0 : b.byteValue();
 	}
 
+	/**
+	 * Implemented over {@link #readValue}.
+	 */
+	@Override
 	public byte[] readBytes() throws SQLException
 	{
-		return (byte[])this.readValue(byte[].class);
+		return readValue(byte[].class);
 	}
 
+	/**
+	 * Implemented over {@link #readClob}.
+	 */
 	public Reader readCharacterStream() throws SQLException
 	{
-		Clob c = this.readClob();
+		Clob c = readClob();
 		return (c == null) ? null : c.getCharacterStream();
 	}
 
+	/**
+	 * Implemented over {@link #readString}.
+	 */
 	public Clob readClob() throws SQLException
 	{
-		String str = this.readString();
+		String str = readString();
 		return (str == null) ? null :  new ClobValue(str);
 	}
 
+	/**
+	 * Implemented over {@link #readValue}.
+	 */
+	@Override
 	public Date readDate() throws SQLException
 	{
-		return (Date)this.readValue(Date.class);
+		return readValue(Date.class);
 	}
 
+	/**
+	 * Implemented over {@link #readNumber}.
+	 */
+	@Override
 	public double readDouble() throws SQLException
 	{
-		Number d = this.readNumber(double.class);
+		Number d = readNumber(double.class);
 		return (d == null) ? 0 : d.doubleValue();
 	}
 
+	/**
+	 * Implemented over {@link #readNumber}.
+	 */
+	@Override
 	public float readFloat() throws SQLException
 	{
-		Number f = this.readNumber(float.class);
+		Number f = readNumber(float.class);
 		return (f == null) ? 0 : f.floatValue();
 	}
 
+	/**
+	 * Implemented over {@link #readNumber}.
+	 */
+	@Override
 	public int readInt() throws SQLException
 	{
-		Number i = this.readNumber(int.class);
+		Number i = readNumber(int.class);
 		return (i == null) ? 0 : i.intValue();
 	}
 
+	/**
+	 * Implemented over {@link #readNumber}.
+	 */
+	@Override
 	public long readLong() throws SQLException
 	{
-		Number l = this.readNumber(long.class);
+		Number l = readNumber(long.class);
 		return (l == null) ? 0 : l.longValue();
 	}
 
+	@Override
 	public Object readObject() throws SQLException
 	{
-		if(m_index < m_tupleDesc.size())
-		{
-			Object v;
-			synchronized(Backend.THREADLOCK)
-			{
-				v = _getObject(this.getNativePointer(), m_tupleDesc.getNativePointer(), ++m_index);
-			}
-			m_wasNull = v == null;
-			return v;
-		}
-		throw new SQLException("Tuple has no more columns");
+		return getObject(nextIndex());
 	}
 
+	/**
+	 * Implemented over {@link #readValue}.
+	 */
+	@Override
 	public Ref readRef() throws SQLException
 	{
-		return (Ref)this.readValue(Ref.class);
+		return readValue(Ref.class);
 	}
 
+	/**
+	 * Implemented over {@link #readNumber}.
+	 */
+	@Override
 	public short readShort() throws SQLException
 	{
-		Number s = this.readNumber(short.class);
+		Number s = readNumber(short.class);
 		return (s == null) ? 0 : s.shortValue();
 	}
 
+	/**
+	 * Implemented over {@link #readValue}.
+	 */
+	@Override
 	public String readString() throws SQLException
 	{
-		return (String)this.readValue(String.class);
+		return readValue(String.class);
 	}
 
+	/**
+	 * Implemented over {@link #readValue}.
+	 */
+	@Override
 	public Time readTime() throws SQLException
 	{
-		return (Time)this.readValue(Time.class);
+		return readValue(Time.class);
 	}
 
+	/**
+	 * Implemented over {@link #readValue}.
+	 */
+	@Override
 	public Timestamp readTimestamp() throws SQLException
 	{
-		return (Timestamp)this.readValue(Timestamp.class);
+		return readValue(Timestamp.class);
 	}
 
+	/**
+	 * Implemented over {@link #readValue}.
+	 */
+	@Override
 	public URL readURL() throws SQLException
 	{
-		return (URL)this.readValue(URL.class);
+		return readValue(URL.class);
 	}
 
-	public boolean wasNull() throws SQLException
+	// ************************************************************
+	// Implementation of JDBC 4 methods. Methods go here if they
+	// don't throw SQLFeatureNotSupportedException; they can be
+	// considered implemented even if they do nothing useful, as
+	// long as that's an allowed behavior by the JDBC spec.
+	// ************************************************************
+
+	@Override
+	public SQLXML readSQLXML()
+		throws SQLException
 	{
-		return m_wasNull;
+		return readObject(SQLXML.class);
 	}
 
-	private Number readNumber(Class numberClass) throws SQLException
-	{
-		return SPIConnection.basicNumericCoersion(numberClass, this.readObject());
-	}
-
-	private Object readValue(Class valueClass) throws SQLException
-	{
-		return SPIConnection.basicCoersion(valueClass, this.readObject());
-	}
 	// ************************************************************
 	// Non-implementation of JDBC 4 methods.
 	// ************************************************************
 
-
+	/** Not yet implemented. */
+	@Override
 	public RowId readRowId()
                 throws SQLException
 	{
 		throw new SQLFeatureNotSupportedException
-			( this.getClass()
+			( getClass()
 			  + ".readRowId() not implemented yet.",
 			  "0A000" );
 	}
 
-	public SQLXML readSQLXML()
-		throws SQLException
-	{
-		throw new SQLFeatureNotSupportedException
-			( this.getClass()
-			  + ".readSQLXML() not implemented yet.",
-			  "0A000" );
-	}
-
+	/** Not yet implemented. */
+	@Override
 	public String readNString()
 		throws SQLException
 	{
 		throw new SQLFeatureNotSupportedException
-			( this.getClass()
+			( getClass()
 			  + ".readNString() not implemented yet.",
 			  "0A000" );
 		
 	}
 	
+	/** Not yet implemented. */
+	@Override
 	public NClob readNClob()
 	       throws SQLException
 	{
 		throw new SQLFeatureNotSupportedException
-			( this.getClass()
+			( getClass()
 			  + ".readNClob() not implemented yet.",
 		  "0A000" );
 		
 	}
 
 	// ************************************************************
-	// End of non-implementation of JDBC 4 methods.
+	// Implementation of JDBC 4.2 method.
 	// ************************************************************
 
-	protected native void _free(long pointer);
+	@Override
+	public <T> T readObject(Class<T> type) throws SQLException
+	{
+		return getObject(nextIndex(), type);
+	}
 
-	private static native Object _getObject(long pointer, long tupleDescPointer, int index)
-	throws SQLException;
+	// ************************************************************
+	// Implementation methods, over methods of ObjectResultSet.
+	// ************************************************************
+
+	private Number readNumber(Class numberClass) throws SQLException
+	{
+		return getNumber(nextIndex(), numberClass);
+	}
+
+	private <T> T readValue(Class<T> valueClass) throws SQLException
+	{
+		return getValue(nextIndex(), valueClass);
+	}
 }

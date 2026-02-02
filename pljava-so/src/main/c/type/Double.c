@@ -1,12 +1,15 @@
 /*
- * Copyright (c) 2004, 2005, 2006 TADA AB - Taby Sweden
- * Copyright (c) 2010, 2011 PostgreSQL Global Development Group
+ * Copyright (c) 2004-2020 Tada AB and other contributors, as listed below.
  *
- * Distributed under the terms shown in the file COPYRIGHT
- * found in the root folder of this project or at
- * http://wiki.tada.se/index.php?title=PLJava_License
+ * All rights reserved. This program and the accompanying materials
+ * are made available under the terms of the The BSD 3-Clause License
+ * which accompanies this distribution, and is available at
+ * http://opensource.org/licenses/BSD-3-Clause
  *
- * @author Thomas Hallgren
+ * Contributors:
+ *   Tada AB
+ *   PostgreSQL Global Development Group
+ *   Chapman Flack
  */
 #include "pljava/type/Type_priv.h"
 #include "pljava/type/Array.h"
@@ -14,7 +17,6 @@
 
 static TypeClass s_doubleClass;
 static jclass    s_Double_class;
-static jclass    s_DoubleArray_class;
 static jmethodID s_Double_init;
 static jmethodID s_Double_doubleValue;
 
@@ -29,9 +31,9 @@ static Datum _asDatum(jdouble v)
 	return ret;
 }
 
-static Datum _double_invoke(Type self, jclass cls, jmethodID method, jvalue* args, PG_FUNCTION_ARGS)
+static Datum _double_invoke(Type self, Function fn, PG_FUNCTION_ARGS)
 {
-	return _asDatum(JNI_callStaticDoubleMethodA(cls, method, args));
+	return _asDatum(pljava_Function_doubleInvoke(fn));
 }
 
 static jvalue _double_coerceDatum(Type self, Datum arg)
@@ -80,21 +82,8 @@ static Datum _doubleArray_coerceObject(Type self, jobject doubleArray)
 
 	nElems = JNI_getArrayLength((jarray)doubleArray);
 	v = createArrayType(nElems, sizeof(jdouble), FLOAT8OID, false);
-	if(!JNI_isInstanceOf( doubleArray, s_DoubleArray_class))
-		JNI_getDoubleArrayRegion((jdoubleArray)doubleArray, 0,
+	JNI_getDoubleArrayRegion((jdoubleArray)doubleArray, 0,
 					 nElems, (jdouble*)ARR_DATA_PTR(v));
-	else
-	{
-		int idx = 0;
-		jdouble *array = (jdouble*)ARR_DATA_PTR(v);
-
-		for(idx = 0; idx < nElems; ++idx)
-		{
-			array[idx] = JNI_callDoubleMethod(JNI_getObjectArrayElement(doubleArray, idx),
-						       s_Double_doubleValue);
-		}
-
-	}
 
 	PG_RETURN_ARRAYTYPE_P(v);
 }
@@ -135,7 +124,6 @@ void Double_initialize(void)
 	TypeClass cls;
 
 	s_Double_class = JNI_newGlobalRef(PgObject_getJavaClass("java/lang/Double"));
-	s_DoubleArray_class = JNI_newGlobalRef(PgObject_getJavaClass("[Ljava/lang/Double;"));
 	s_Double_init = PgObject_getJavaMethod(s_Double_class, "<init>", "(D)V");
 	s_Double_doubleValue = PgObject_getJavaMethod(s_Double_class, "doubleValue", "()D");
 

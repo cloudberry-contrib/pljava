@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016 Tada AB and other contributors, as listed below.
+ * Copyright (c) 2016-2025 Tada AB and other contributors, as listed below.
  *
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the The BSD 3-Clause License
@@ -15,6 +15,8 @@ import java.math.BigDecimal;
 import java.sql.Date;
 import java.sql.Time;
 import java.sql.Timestamp;
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.net.URL;
 import java.net.MalformedURLException;
 
@@ -25,7 +27,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.StringReader;
 import java.nio.ByteBuffer;
 import java.nio.CharBuffer;
-import java.nio.charset.Charset;
+import static java.nio.charset.StandardCharsets.UTF_8;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CharsetDecoder;
 import java.nio.charset.CharsetEncoder;
@@ -54,9 +56,8 @@ import static
  * supported JDBC data types, which it writes on output, and reads/verifies on
  * input.
  */
-@SQLAction(requires={"udtscalariotest type", "udtscalariotest boot fn"},
-	install={
-		"SELECT javatest.udtscalariotest()", // force class to resolve
+@SQLAction(requires= { "udtscalariotest type" },
+	install = {
 		"SELECT CAST('' AS javatest.udtscalariotest)" // test send/recv
 	})
 @BaseUDT(schema="javatest", provides="udtscalariotest type")
@@ -96,18 +97,16 @@ public class UDTScalarIOTest implements SQLData
 			s_gedicht = s_gedicht + s_gedicht + s_gedicht; // x3
 			s_gedicht = s_gedicht + s_gedicht + s_gedicht; // x9
 
-			ByteBuffer bb = Charset.forName("UTF-8").newEncoder().encode(
+			ByteBuffer bb = UTF_8.newEncoder().encode(
 				CharBuffer.wrap(s_gedicht));
 			s_utfgedicht = new byte[bb.limit()];
 			bb.get(s_utfgedicht);
 
-			s_url = new URL("http://tada.github.io/pljava/");
+			s_url = new URI("http://tada.github.io/pljava/").toURL();
 		}
-		catch ( CharacterCodingException e )
-		{
-			throw new RuntimeException(e);
-		}
-		catch ( MalformedURLException e )
+		catch (
+			CharacterCodingException |
+			URISyntaxException | MalformedURLException e )
 		{
 			throw new RuntimeException(e);
 		}
@@ -216,24 +215,5 @@ public class UDTScalarIOTest implements SQLData
 			throw new SQLException("timestamp mismatch");
 		if ( ! s_url.equals(stream.readURL()) )
 			throw new SQLException("url mismatch");
-	}
-
-	/**
-	 * A no-op function that forces the UDTScalarIOTest class to be loaded.
-	 * This is only necessary because the deployment-descriptor install
-	 * actions contain a query making use of this type, and PostgreSQL does
-	 * not expect type in/out/send/recv functions to need an updated
-	 * snapshot, so it will try to find this class in the snapshot from
-	 * before the jar was installed, and fail. By providing this function,
-	 * which defaults to volatile so it gets an updated snapshot, and
-	 * calling it first, the class will be found and loaded; once it is
-	 * loaded, the user-defined type operations are able to find it.
-	 * <p>
-	 * Again, this is only an issue when trying to make use of the newly
-	 * loaded UDT from right within the deployment descriptor for the jar.
-	 */
-	@Function(schema="javatest", provides="udtscalariotest boot fn")
-	public static void udtscalariotest()
-	{
 	}
 }

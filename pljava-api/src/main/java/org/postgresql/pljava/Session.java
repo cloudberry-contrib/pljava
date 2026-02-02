@@ -1,48 +1,92 @@
 /*
- * Copyright (c) 2004, 2005, 2006 TADA AB - Taby Sweden
- * Distributed under the terms shown in the file COPYRIGHT
- * found in the root folder of this project or at
- * http://eng.tada.se/osprojects/COPYRIGHT.html
+ * Copyright (c) 2004-2025 Tada AB and other contributors, as listed below.
+ *
+ * All rights reserved. This program and the accompanying materials
+ * are made available under the terms of the The BSD 3-Clause License
+ * which accompanies this distribution, and is available at
+ * http://opensource.org/licenses/BSD-3-Clause
+ *
+ * Contributors:
+ *   Tada AB
+ *   Chapman Flack
  */
 package org.postgresql.pljava;
+
+import java.security.AccessControlContext; // linked from javadoc
 
 import java.sql.Connection;
 import java.sql.SQLException;
 
+import java.util.Properties;
+
 /**
- * A Session maintains transaction coordinated in-memory data. The data
- * added since the last commit will be lost on a transaction rollback, i.e.
- * the Session state is synchronized with the transaction.
+ * A Session brings together some useful methods and data for the current
+ * database session. It provides a set of attributes (a
+ * {@code String} to {@code Object} map). Until PL/Java 1.2.0, its attribute
+ * store had transactional behavior (i.e., the data
+ * added since the last commit would be lost on a transaction rollback, or kept
+ * after a commit), but in 1.2.0 and later, it has not, and has functioned as a
+ * {@code Map} with no awareness of transactions. Java already provides those,
+ * so the attribute-related methods of {@code Session} are now deprecated.
  * 
- * Please note that if nested objects (such as lists and maps) are stored
- * in the session, changes internal to those objects are not subject to
- * the session semantics since the session is unaware of them.
+ * {@code TransactionListeners} and {@code SavepointListeners} are available for
+ * use by any code that needs to synchronize some state with PostgreSQL
+ * transactions.
  * 
  * @author Thomas Hallgren
  */
 public interface Session
 {
 	/**
-	 * Adds the specified <code>listener</code> to the list of listeners that will
-	 * receive savepoint events. This method does nothing if the listener
-	 * was already added.
+	 * Returns an unmodifiable defensive copy of the Java
+	 * {@link System#getProperties() system properties} taken early in PL/Java
+	 * startup before user code has an opportunity to write them.
+	 *<p>
+	 * When PL/Java is running without security policy enforcement, as on stock
+	 * Java 24 and later, using the frozen properties can simplify defensive
+	 * coding against the possibility of arbitrary property modifications.
+	 *
+	 * @return a {@link Properties} object that departs from the API spec by
+	 * throwing {@link UnsupportedOperationException} from any method if the
+	 * properties would otherwise be modified.
+	 */
+	Properties frozenSystemProperties();
+
+	/**
+	 * Adds the specified {@code listener} to the list of listeners that will
+	 * receive savepoint events. An {@link AccessControlContext} saved by this
+	 * method will be used when the listener is invoked. If the listener was
+	 * already registered, it remains registered just once, though the
+	 * {@code AccessControlContext} is updated and its order of invocation
+	 * relative to other listeners may change.
 	 * @param listener The listener to be added.
 	 */
 	void addSavepointListener(SavepointListener listener);
 
 	/**
-	 * Adds the specified <code>listener</code> to the list of listeners that will
-	 * receive transactional events. This method does nothing if the listener
-	 * was already added.
+	 * Adds the specified {@code listener} to the list of listeners that will
+	 * receive transaction events. An {@link AccessControlContext} saved by this
+	 * method will be used when the listener is invoked. If the listener was
+	 * already registered, it remains registered just once, though the
+	 * {@code AccessControlContext} is updated and its order of invocation
+	 * relative to other listeners may change.
 	 * @param listener The listener to be added.
 	 */
 	void addTransactionListener(TransactionListener listener);
 
 	/**
 	 * Obtain an attribute from the current session.
+	 *
+	 * @deprecated {@code Session}'s attribute store once had a special, and
+	 * possibly useful, transactional behavior, but since PL/Java 1.2.0 it has
+	 * lacked that, and offers nothing you don't get with an ordinary
+	 * {@code Map} (that forbids nulls). If some kind of store with
+	 * transactional behavior is needed, it should be implemented in straight
+	 * Java and kept in sync by using a {@link TransactionListener}.
 	 * @param attributeName The name of the attribute
 	 * @return The value of the attribute
 	 */
+	@Deprecated(since="1.5.3", forRemoval=true)
 	Object getAttribute(String attributeName);
 
 	/**
@@ -52,7 +96,7 @@ public interface Session
 	 * constructor for one argument of type <code>ObjectPool</code>.
 	 * @return An object pool that pools object of the given class.
 	 */
-	ObjectPool getObjectPool(Class cls);
+	<T extends PooledObject> ObjectPool<T> getObjectPool(Class<T> cls);
 
 	/**
 	 * Return the current <em>effective</em> database user name.
@@ -91,10 +135,10 @@ public interface Session
 	 * unconditionally, which is incorrect for any PostgreSQL version newer
 	 * than 8.0, because it was unaware of {@code SET ROLE} introduced in
 	 * 8.1. Any actual use case for a method that ignores roles and reports
-	 * only the session ID should be
-	 * <a href='../../../../issue-tracking.html'>reported as an issue.</a>
+	 * only the session ID should be <a href=
+'../../../../../../issue-management.html'>reported as an issue.</a>
 	 */
-	@Deprecated
+	@Deprecated(since="1.5.0", forRemoval=true)
 	String getSessionUserName();
 
 	/**
@@ -120,40 +164,56 @@ public interface Session
 	 * which is incorrect for any PostgreSQL version newer than 8.0, because
 	 * it was unaware of {@code SET ROLE} introduced in 8.1. Any actual use
 	 * case for a method that ignores roles and uses only the session ID
-	 * should be <a href='../../../../issue-tracking.html'>reported as an
-	 * issue</a>.
+	 * should be <a href=
+'../../../../../../issue-management.html'>reported as an issue</a>.
 	 */
-	@Deprecated
+	@Deprecated(since="1.5.0", forRemoval=true)
 	void executeAsSessionUser(Connection conn, String statement)
 	throws SQLException;
 
 	/**
 	 * Remove an attribute previously stored in the session. If
 	 * no attribute is found, nothing happens.
+	 *
+	 * @deprecated {@code Session}'s attribute store once had a special, and
+	 * possibly useful, transactional behavior, but since PL/Java 1.2.0 it has
+	 * lacked that, and offers nothing you don't get with an ordinary
+	 * {@code Map} (that forbids nulls). If some kind of store with
+	 * transactional behavior is needed, it should be implemented in straight
+	 * Java and kept in sync by using a {@link TransactionListener}.
 	 * @param attributeName The name of the attribute.
 	 */
+	@Deprecated(since="1.5.3", forRemoval=true)
 	void removeAttribute(String attributeName);
 
 	/**
-	 * Removes the specified <code>listener</code> from the list of listeners that will
-	 * receive savepoint events. This method does nothing unless the listener is
-	 * found.
+	 * Removes the specified {@code listener} from the list of listeners that
+	 * will receive savepoint events. This method does nothing unless
+	 * the listener is found.
 	 * @param listener The listener to be removed.
 	 */
 	void removeSavepointListener(SavepointListener listener);
 
 	/**
-	 * Removes the specified <code>listener</code> from the list of listeners that will
-	 * receive transactional events. This method does nothing unless the listener is
-	 * found.
+	 * Removes the specified {@code listener} from the list of listeners that
+	 * will receive transaction events. This method does nothing unless
+	 * the listener is found.
 	 * @param listener The listener to be removed.
 	 */
 	void removeTransactionListener(TransactionListener listener);
 
 	/**
 	 * Set an attribute to a value in the current session.
+	 *
+	 * @deprecated {@code Session}'s attribute store once had a special, and
+	 * possibly useful, transactional behavior, but since PL/Java 1.2.0 it has
+	 * lacked that, and offers nothing you don't get with an ordinary
+	 * {@code Map} (that forbids nulls). If some kind of store with
+	 * transactional behavior is needed, it should be implemented in straight
+	 * Java and kept in sync by using a {@link TransactionListener}.
 	 * @param attributeName
 	 * @param value
 	 */
+	@Deprecated(since="1.5.3", forRemoval=true)
 	void setAttribute(String attributeName, Object value);
 }

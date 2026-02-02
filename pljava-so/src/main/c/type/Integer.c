@@ -1,12 +1,15 @@
 /*
- * Copyright (c) 2004, 2005, 2006 TADA AB - Taby Sweden
- * Copyright (c) 2010, 2011 PostgreSQL Global Development Group
+ * Copyright (c) 2004-2020 Tada AB and other contributors, as listed below.
  *
- * Distributed under the terms shown in the file COPYRIGHT
- * found in the root folder of this project or at
- * http://wiki.tada.se/index.php?title=PLJava_License
+ * All rights reserved. This program and the accompanying materials
+ * are made available under the terms of the The BSD 3-Clause License
+ * which accompanies this distribution, and is available at
+ * http://opensource.org/licenses/BSD-3-Clause
  *
- * @author Thomas Hallgren
+ * Contributors:
+ *   Tada AB
+ *   PostgreSQL Global Development Group
+ *   Chapman Flack
  */
 #include "pljava/type/Type_priv.h"
 #include "pljava/type/Array.h"
@@ -14,16 +17,15 @@
 
 static TypeClass s_intClass;
 static jclass    s_Integer_class;
-static jclass    s_IntegerArray_class;
 static jmethodID s_Integer_init;
 static jmethodID s_Integer_intValue;
 
 /*
  * int primitive type.
  */
-static Datum _int_invoke(Type self, jclass cls, jmethodID method, jvalue* args, PG_FUNCTION_ARGS)
+static Datum _int_invoke(Type self, Function fn, PG_FUNCTION_ARGS)
 {
-	jint iv = JNI_callStaticIntMethodA(cls, method, args);
+	jint iv = pljava_Function_intInvoke(fn);
 	return Int32GetDatum(iv);
 }
 
@@ -75,20 +77,8 @@ static Datum _intArray_coerceObject(Type self, jobject intArray)
 
 	v = createArrayType(nElems, sizeof(jint), INT4OID, false);
 
-	if(!JNI_isInstanceOf( intArray, s_IntegerArray_class))
-	  JNI_getIntArrayRegion((jintArray)intArray, 0, nElems, (jint*)ARR_DATA_PTR(v));
-	else
-	  {
-	    int idx = 0;
-	    jint *array = (jint*)ARR_DATA_PTR(v);
-
-	    for(idx = 0; idx < nElems; ++idx)
-	      {
-		array[idx] = JNI_callIntMethod(JNI_getObjectArrayElement(intArray, idx),
-					       s_Integer_intValue);
-	      }
-	  }
-
+	JNI_getIntArrayRegion(
+			(jintArray)intArray, 0, nElems, (jint*)ARR_DATA_PTR(v));
 
 	PG_RETURN_ARRAYTYPE_P(v);
 }
@@ -129,7 +119,6 @@ void Integer_initialize(void)
 	TypeClass cls;
 
 	s_Integer_class = JNI_newGlobalRef(PgObject_getJavaClass("java/lang/Integer"));
-	s_IntegerArray_class = JNI_newGlobalRef(PgObject_getJavaClass("[Ljava/lang/Integer;"));
 	s_Integer_init = PgObject_getJavaMethod(s_Integer_class, "<init>", "(I)V");
 	s_Integer_intValue = PgObject_getJavaMethod(s_Integer_class, "intValue", "()I");
 

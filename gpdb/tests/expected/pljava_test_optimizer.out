@@ -649,8 +649,8 @@ SELECT id,name, salary FROM employees2 order by id;
 -- s/\(SOMEFILE\:SOMEFUNC\)//
 -- end_matchsubs
 SELECT javatest.transferPeople(1) FROM javatest.test;  -- should error
-ERROR:  query plan with multiple segworker groups is not supported
-HINT:  likely caused by a function that reads or modifies data in a distributed table
+ERROR:  function cannot execute on a QE slice because it accesses relation "javatest.employees1"
+CONTEXT:  SQL statement "SELECT id, name, salary FROM employees1 WHERE salary > $1"
 select javatest.maxFromSetReturnExample(2,10);
  maxfromsetreturnexample 
 -------------------------

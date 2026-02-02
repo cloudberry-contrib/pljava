@@ -1,6 +1,7 @@
 /.classpath
 /.project
 /.settings
+.idea/
 target/site
 target/staging
 target/javadoc-bundle-options
@@ -11,3 +12,8 @@ target/
 *.so
 *.zip
 concourse/secrets/
+nar-maven-plugin/
+nar-maven-plugin.tar.gz
+gpdb/tests/results/
+gpdb/tests/regression.*
+artifacts/

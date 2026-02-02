@@ -1,8 +1,14 @@
 /*
- * Copyright (c) 2004, 2005, 2006 TADA AB - Taby Sweden
- * Distributed under the terms shown in the file COPYRIGHT
- * found in the root directory of this distribution or at
- * http://eng.tada.se/osprojects/COPYRIGHT.html
+ * Copyright (c) 2004-2025 Tada AB and other contributors, as listed below.
+ *
+ * All rights reserved. This program and the accompanying materials
+ * are made available under the terms of the The BSD 3-Clause License
+ * which accompanies this distribution, and is available at
+ * http://opensource.org/licenses/BSD-3-Clause
+ *
+ * Contributors:
+ *   Tada AB
+ *   Chapman Flack
  */
 package org.postgresql.pljava.internal;
 
@@ -14,26 +20,27 @@ import java.util.IdentityHashMap;
 import org.postgresql.pljava.ObjectPool;
 import org.postgresql.pljava.PooledObject;
 
-class ObjectPoolImpl implements ObjectPool
+class ObjectPoolImpl<T extends PooledObject> implements ObjectPool<T>
 {
 	/**
 	 * An InstanceHandle is a link in a single linked list that
 	 * holds on to a ResultSetProvider.
 	 */
-	private static class PooledObjectHandle
+	private static class PooledObjectHandle<T extends PooledObject>
 	{
-		private PooledObject m_instance;
-		private PooledObjectHandle m_next;
+		private T m_instance;
+		private PooledObjectHandle<T> m_next;
 	}
 
 	private static Class[] s_ctorSignature = { ObjectPool.class };
 	private static PooledObjectHandle s_handlePool;
-	private static final IdentityHashMap s_poolCache = new IdentityHashMap();
+	private static final IdentityHashMap<Class<?>,ObjectPoolImpl<?>>
+		s_poolCache = new IdentityHashMap<>();
 
-	private final Constructor m_ctor;
-	private PooledObjectHandle m_providerPool;
+	private final Constructor<T> m_ctor;
+	private PooledObjectHandle<T> m_providerPool;
 
-	private ObjectPoolImpl(Class c)
+	private ObjectPoolImpl(Class<T> c)
 	{
 		if(!PooledObject.class.isAssignableFrom(c))
 			throw new IllegalArgumentException("Class " + c + " does not implement the " +
@@ -55,13 +62,12 @@ class ObjectPoolImpl implements ObjectPool
 
 	/**
 	 * Obtain a pool for the given class.
-	 * @param cls
-	 * @return
-	 * @throws SQLException
 	 */
-	public static ObjectPoolImpl getObjectPool(Class cls)
+	@SuppressWarnings("unchecked")
+	public static <T extends PooledObject> ObjectPoolImpl<T>
+	getObjectPool(Class<T> cls)
 	{
-		ObjectPoolImpl pool = (ObjectPoolImpl)s_poolCache.get(cls);
+		ObjectPoolImpl<T> pool = (ObjectPoolImpl<T>)s_poolCache.get(cls);
 		if(pool == null)
 		{
 			pool = new ObjectPoolImpl(cls);
@@ -70,11 +76,12 @@ class ObjectPoolImpl implements ObjectPool
 		return pool;
 	}
 
-	public PooledObject activateInstance()
+	@SuppressWarnings("unchecked")
+	public T activateInstance()
 	throws SQLException
 	{
-		PooledObject instance;
-		PooledObjectHandle handle = m_providerPool;
+		T instance;
+		PooledObjectHandle<T> handle = m_providerPool;
 		if(handle != null)
 		{
 			m_providerPool = handle.m_next;
@@ -90,7 +97,7 @@ class ObjectPoolImpl implements ObjectPool
 		{
 			try
 			{
-				instance = (PooledObject)m_ctor.newInstance(new Object[] { this });
+				instance = m_ctor.newInstance(new Object[] { this });
 			}
 			catch(InvocationTargetException e)
 			{
@@ -125,7 +132,7 @@ class ObjectPoolImpl implements ObjectPool
 		return instance;
 	}
 
-	public void passivateInstance(PooledObject instance)
+	public void passivateInstance(T instance)
 	throws SQLException
 	{
 		try
@@ -141,21 +148,24 @@ class ObjectPoolImpl implements ObjectPool
 		// Obtain a handle from the pool of handles so that
 		// we have something to wrap the instance in.
 		//
-		PooledObjectHandle handle = s_handlePool;
+		@SuppressWarnings("unchecked")
+		PooledObjectHandle<T> handle = (PooledObjectHandle<T>)s_handlePool;
 		if(handle != null)
 			s_handlePool = handle.m_next;
 		else
-			handle = new PooledObjectHandle();
+			handle = new PooledObjectHandle<>();
 
 		handle.m_instance = instance;
 		handle.m_next = m_providerPool;
 		m_providerPool = handle;
 	}
 
-	public void removeInstance(PooledObject instance) throws SQLException
+	@SuppressWarnings("unchecked")
+	public void removeInstance(T instance) throws SQLException
 	{
 		PooledObjectHandle prev = null;
-		for(PooledObjectHandle handle = m_providerPool; handle != null; handle = handle.m_next)
+		for(PooledObjectHandle handle = m_providerPool;
+			handle != null; handle = handle.m_next)
 		{
 			if(handle.m_instance == instance)
 			{

@@ -1,8 +1,14 @@
 /*
- * Copyright (c) 2004, 2005, 2006 TADA AB - Taby Sweden
- * Distributed under the terms shown in the file COPYRIGHT
- * found in the root folder of this project or at
- * http://eng.tada.se/osprojects/COPYRIGHT.html
+ * Copyright (c) 2004-2025 Tada AB and other contributors, as listed below.
+ *
+ * All rights reserved. This program and the accompanying materials
+ * are made available under the terms of the The BSD 3-Clause License
+ * which accompanies this distribution, and is available at
+ * http://opensource.org/licenses/BSD-3-Clause
+ *
+ * Contributors:
+ *   Tada AB
+ *   Chapman Flack
  */
 package org.postgresql.pljava.jdbc;
 
@@ -12,9 +18,26 @@ import java.util.ArrayList;
 import java.util.logging.Logger;
 
 import org.postgresql.pljava.internal.Backend;
+import static org.postgresql.pljava.internal.Backend.doInPG;
 import org.postgresql.pljava.internal.PgSavepoint;
+import org.postgresql.pljava.internal.ServerException; // for javadoc
+import org.postgresql.pljava.internal.UnhandledPGException; // for javadoc
 
 /**
+ * One invocation, from PostgreSQL, of functionality implemented using PL/Java.
+ *<p>
+ * This class is the Java counterpart of the {@code struct Invocation_} in the
+ * C code, but while there is a new stack-allocated C structure on every entry
+ * from PG to PL/Java, no instance of this class is created unless requested
+ * (with {@link #current current()}; once requested, a reference to it is saved
+ * in the C struct for the duration of the invocation.
+ *<p>
+ * One further piece of magic applies to set-returning functions. Under the
+ * value-per-call protocol, there is technically a new entry into PL/Java, and
+ * a new C {@code Invocation_} struct, for every row to be returned, but that
+ * low-level complication is hidden at this level: a single instance of this
+ * class, if once requested, will be remembered throughout the value-per-call
+ * sequence of calls.
  * @author Thomas Hallgren
  */
 public class Invocation
@@ -23,6 +46,61 @@ public class Invocation
 	 * The current "stack" of invocations.
 	 */
 	private static Invocation[] s_levels = new Invocation[10];
+
+	/**
+	 * Recent exception representing a PostgreSQL {@code ereport(ERROR} that has
+	 * been thrown in Java but not yet resolved (as by rollback of the
+	 * transaction or subtransaction / savepoint).
+	 *<p>
+	 * Mutation happens on "the PG thread".
+	 *<p>
+	 * This field should be non-null when and only when {@code errorOccurred}
+	 * is true in the C {@code Invocation} struct. Both are set when such an
+	 * exception is thrown, and cleared by
+	 * {@link #clearErrorCondition clearErrorCondition}.
+	 *<p>
+	 * One static field suffices, not one per invocation nesting level, because
+	 * it will always be recognized and cleared on invocation exit (to any
+	 * possible outer nest level), and {@code errorOccurred} is meant to prevent
+	 * calling into any PostgreSQL functions that could reach an inner nest
+	 * level. (On reflection, that reasoning ought to apply also to
+	 * {@code errorOccurred} itself, but that has been the way it is for decades
+	 * and this can be added without changing that.)
+	 *<p>
+	 * On the first creation of a {@link ServerException ServerException}, that
+	 * exception is stored here. If any later call into PostgreSQL is thwarted
+	 * by finding {@code errorOccurred} true, the {@code ServerException} stored
+	 * here will be replaced by an
+	 * {@link UnhandledPGException UnhandledPGException} that has the original
+	 * {@code ServerException} as its {@link Throwable#cause cause} and the new
+	 * exception will be thrown. Once this field holds an
+	 * {@code UnhandledPGException}, it will be reused and rethrown unchanged if
+	 * further attempts to call into PostgreSQL are made.
+	 *<p>
+	 * At invocation exit, the C {@code popInvocation} code knows whether the
+	 * exit is normal or exceptional. If the exit is normal but
+	 * {@code errorOccurred} is true, that means the exiting Java function
+	 * caught a {@code ServerException} but without rethrowing it (or some
+	 * higher-level exception) and also without resolving it (as with a
+	 * rollback). That is a bug in the Java function, and the exception stored
+	 * here can have its stacktrace logged. If it is the original
+	 * {@code ServerException}, the logging will be skipped at levels quieter
+	 * than {@code DEBUG1}. If the exception here is already
+	 * {@code UnhandledPGException}, then at least one attempted PostgreSQL
+	 * operation is known to have been thwarted because of it, and a stacktrace
+	 * will be generated at {@code WARNING} level.
+	 *<p>
+	 * If the invocation is being popped exceptionally, the exception probably
+	 * is this one, or has this one in its cause chain, and longstanding code
+	 * in {@code JNICalls.c::endCall} will have generated that stack trace at
+	 * level {@code DEBUG1}. Should that not be the case, then a stacktrace of
+	 * this exception can be obtained from {@code popInvocation} by bumping the
+	 * level to {@code DEBUG2}.
+	 *<p>
+	 * Public access so factory methods of {@code ServerException} and
+	 * {@code UnhandledPGException}, in another package, can access it.
+	 */
+	public static SQLException s_unhandled;
 
 	/**
 	 * Nesting level for this invocation
@@ -55,29 +133,6 @@ public class Invocation
 		return m_savepoint;
 	}
 
-	private ArrayList m_preparedStatements;
-
-	final void manageStatement(PreparedStatement statement)
-	{
-		if(m_preparedStatements == null)
-			m_preparedStatements = new ArrayList();
-		m_preparedStatements.add(statement);
-	}
-
-	final void forgetStatement(PreparedStatement statement)
-	{
-		if(m_preparedStatements == null)
-			return;
-
-		int idx = m_preparedStatements.size();
-		while(--idx >= 0)
-			if(m_preparedStatements.get(idx) == statement)
-			{
-				m_preparedStatements.remove(idx);
-				return;
-			}
-	}
-
 	/**
 	 * @param savepoint The savepoint to set.
 	 */
@@ -90,31 +145,13 @@ public class Invocation
 	 * Called from the backend when the invokation exits. Should
 	 * not be invoked any other way.
 	 */
-	public void onExit()
+	public void onExit(boolean withError)
 	throws SQLException
 	{
 		try
 		{
 			if(m_savepoint != null)
-				m_savepoint.onInvocationExit(SPIDriver.getDefault());
-
-			if(m_preparedStatements != null)
-			{
-				int idx = m_preparedStatements.size();
-				if(idx > 0)
-				{
-					Logger w = Logger.getAnonymousLogger();
-					w.warning(
-						"Closing " + idx + " \"forgotten\" statement"
-							+ ((idx > 1) ? "s" : ""));
-					while(--idx >= 0)
-					{
-						PreparedStatement stmt = (PreparedStatement)m_preparedStatements.get(idx);
-						w.fine("Closed: " + stmt);
-						stmt.close();
-					}
-				}
-			}
+				m_savepoint.onInvocationExit(withError);
 		}
 		finally
 		{
@@ -127,7 +164,7 @@ public class Invocation
 	 */
 	public static Invocation current()
 	{
-		synchronized(Backend.THREADLOCK)
+		return doInPG(() ->
 		{
 			Invocation curr = _getCurrent();
 			if(curr != null)
@@ -156,15 +193,16 @@ public class Invocation
 			s_levels[level] = curr;
 			curr._register();
 			return curr;
-		}
+		});
 	}
 
-	static void clearErrorCondition()
+	public static void clearErrorCondition()
 	{
-		synchronized(Backend.THREADLOCK)
+		doInPG(() ->
 		{
+			s_unhandled = null;
 			_clearErrorCondition();
-		}
+		});
 	}
 
 	/**

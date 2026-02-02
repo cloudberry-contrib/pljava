@@ -14,12 +14,15 @@ import org.postgresql.pljava.annotation.SQLAction;
 @SQLAction(requires="1010962 func",
 	install={
 		"CREATE TYPE javatest.B1010962 AS ( b1_val float8, b2_val int)",
+
 		"CREATE TYPE javatest.C1010962 AS ( c1_val float8, c2_val float8)",
+
 		"CREATE TYPE javatest.A1010962 as (" +
 		" b B1010962," +
 		" c C1010962," +
 		" a_val int" +
 		")",
+
 		"SELECT javatest.complexParam(array_agg(" +
 		" CAST(" +
 		"  (" +

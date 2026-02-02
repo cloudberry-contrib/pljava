@@ -4,7 +4,7 @@
 	<parent>
 		<groupId>org.postgresql</groupId>
 		<artifactId>pljava.app</artifactId>
-		<version>1.5.0</version>
+		<version>1.6.10</version>
 	</parent>
 	<artifactId>pljava</artifactId>
 	<name>PL/Java backend Java code</name>
@@ -16,120 +16,203 @@
 			<version>${project.version}</version>
 		</dependency>
 	</dependencies>
+
 	<build>
 		<plugins>
 			<plugin>
 				<groupId>org.apache.maven.plugins</groupId>
-				<artifactId>maven-shade-plugin</artifactId>
-				<version>1.4</version>
+				<artifactId>maven-compiler-plugin</artifactId>
 				<configuration>
-					<createDependencyReducedPom>true</createDependencyReducedPom>
-					<filters>
-						<filter>
-							<artifact>*:*</artifact>
-							<excludes>
-								<exclude>META-INF/*.SF</exclude>
-								<exclude>META-INF/*.DSA</exclude>
-								<exclude>META-INF/*.RSA</exclude>
-							</excludes>
-						</filter>
-					</filters>
-				</configuration>
-				<executions>
-					<execution>
-						<phase>package</phase>
-						<goals>
-							<goal>shade</goal>
-						</goals>
-					</execution>
-				</executions>
-			</plugin>
-			<plugin>
-				<groupId>org.apache.maven.plugins</groupId>
-				<artifactId>maven-jar-plugin</artifactId>
-				<configuration>
-					<archive>
-						<manifestSections>
-							<manifestSection>
-								<name>org/postgresql/pljava/</name>
-								<!--
-								  This section totally doesn't belong here - it
-								  is crazy that the shade plugin cannot copy it
-								  from the manifest of the API jar being shaded
-								  in - even the manifest transformer is no help.
-								-->
-								<manifestEntries>
-									<Implementation-Title>
-										PL/Java API
-									</Implementation-Title>
-									<Implementation-Version>
-										${project.dependencies[0].version}
-									</Implementation-Version>
-									<Implementation-Vendor>
-										${project.organization.name}
-									</Implementation-Vendor>
-								</manifestEntries>
-							</manifestSection>
-							<manifestSection>
-								<name>org/postgresql/pljava/internal/</name>
-								<manifestEntries>
-									<Implementation-Title>
-										${project.name}
-									</Implementation-Title>
-									<Implementation-Version>
-										${project.version}
-									</Implementation-Version>
-									<Implementation-Vendor>
-										${project.organization.name}
-									</Implementation-Vendor>
-								</manifestEntries>
-							</manifestSection>
-							<manifestSection>
-								<name>org/postgresql/pljava/jdbc/</name>
-								<manifestEntries>
-									<Implementation-Title>
-										${project.name}
-									</Implementation-Title>
-									<Implementation-Version>
-										${project.version}
-									</Implementation-Version>
-									<Implementation-Vendor>
-										${project.organization.name}
-									</Implementation-Vendor>
-								</manifestEntries>
-							</manifestSection>
-							<manifestSection>
-								<name>org/postgresql/pljava/management/</name>
-								<manifestEntries>
-									<Implementation-Title>
-										${project.name}
-									</Implementation-Title>
-									<Implementation-Version>
-										${project.version}
-									</Implementation-Version>
-									<Implementation-Vendor>
-										${project.organization.name}
-									</Implementation-Vendor>
-								</manifestEntries>
-							</manifestSection>
-							<manifestSection>
-								<name>org/postgresql/pljava/sqlj/</name>
-								<manifestEntries>
-									<Implementation-Title>
-										${project.name}
-									</Implementation-Title>
-									<Implementation-Version>
-										${project.version}
-									</Implementation-Version>
-									<Implementation-Vendor>
-										${project.organization.name}
-									</Implementation-Vendor>
-								</manifestEntries>
-							</manifestSection>
-						</manifestSections>
-					</archive>
+					<compilerArgs>
+						<arg>-h</arg>
+						<arg>${basedir}/target/javah-include</arg>
+
+						<arg>--processor-module-path</arg>
+						<arg>${basedir}/../pljava-api/target/pljava-api-${project.version}.jar</arg>
+					</compilerArgs>
+					<annotationProcessors>
+						<annotationProcessor>
+							org.postgresql.pljava.annotation.processing.DDRProcessor
+						</annotationProcessor>
+					</annotationProcessors>
 				</configuration>
 			</plugin>
 		</plugins>
 	</build>
+	<reporting>
+		<plugins>
+			<plugin>
+				<groupId>org.postgresql</groupId>
+				<artifactId>pljava-pgxs</artifactId>
+				<version>${pljava.pgxs.version}</version>
+				<reportSets>
+					<reportSet>
+						<reports>
+							<report>scripted-report</report>
+						</reports>
+						<configuration>
+							<script mimetype="application/javascript">
+<![CDATA[
+function canGenerateReport(report)
+{
+	/*
+	 * Javadoc is run below with the --module-source-path mod=path syntax, which
+	 * appears in javadoc 12.
+	 */
+	var v = java.lang.Runtime.version();
+	if ( 0 <= v.compareTo(java.lang.Runtime.Version.parse("12")) )
+		return true;
+	warn("Skipping JavaDocs; Java >= 12 required");
+	return false;
+}
+
+function getName(report, locale)
+{
+	return "JavaDocs";
+}
+
+function getDescription(report, locale)
+{
+	return "JavaDoc API documentation.";
+}
+
+function getOutputName(report)
+{
+	return java.nio.file.Paths
+		.get("apidocs", "org.postgresql.pljava.internal", "module-summary")
+		.toString();
+}
+
+function isExternalReport(report)
+{
+	return true;
+}
+
+function executeReport(report, locale)
+{
+	try
+	{
+		var paths = buildPaths(report.project.compileClasspathElements);
+
+		var title = report.project.name + " " + report.project.version;
+
+		var basedir = report.project.basedir.toPath();
+
+		var srcroot = java.nio.file.Paths.get("src", "main", "java");
+		srcroot = resolve(basedir, srcroot);
+		var srcrooturi = srcroot.toUri();
+
+		var jdklink = "https://docs.oracle.com/" +
+			locale.language + "/java/javase/12/docs/api";
+
+		var apioffline =
+			basedir.toUri().resolve("../pljava-api/target/site/apidocs");
+
+		var bottom =
+			"Copyright &#169; " +
+			report.project.inceptionYear +
+			"&#x2013;" + new Date().getFullYear() +
+			"<a href='" + report.project.organization.url + "'>" +
+			report.project.organization.name + "</a>";
+
+		var args = java.util.List.of(
+			/*
+			 * The 'standard options' that javadoc inherits from javac. Do not
+			 * add --release: it causes -encoding to be ignored (in javadoc 12
+			 * through 15, anyway). -d is documented as a doclet option, but
+			 * included here to be seen by the RelativizingFileManager (which
+			 * may otherwise complain that no class output location has been
+			 * set).
+			 */
+			"-d",                     report.reportOutputDirectory.toPath()
+										.resolve("apidocs").toString(),
+			"-encoding",              report.inputEncoding,
+			"--module-path",          paths.get("modulepath"),
+			"--module-source-path", "org.postgresql.pljava.internal=" + srcroot,
+			// ^^^ Options recognized by the file manager end here ^^^
+			"--module",               "org.postgresql.pljava.internal",
+			/*
+			 * Core javadoc options.
+			 * Avoid the legacy package/private/protected/public options; they
+			 * can clobber the effects of the newer -show-...=... options.
+			 */
+			"-locale",                locale.toString(),
+			"-quiet",
+			"--show-module-contents", "all",
+			"--show-packages",        "all",
+			/*
+			 * Options that are passed to the doclet.
+			 */
+			"-author",
+			"-bottom",            bottom,
+			"-docencoding",       report.outputEncoding,
+			"-doctitle",          title,
+			"-link",              jdklink,
+			"-linkoffline",
+								  "../../RELDOTS/pljava-api/apidocs",
+								  apioffline.toString(),
+			//"-sourcetab",       "4",//seemed good idea but implies -linksource
+			"-use",
+			"-version",
+			"-windowtitle",       title
+		);
+
+		debug(args.toString());
+		var tool = javax.tools.ToolProvider.getSystemDocumentationTool();
+
+		function diagListener(d)
+		{
+			var s = d.source;
+
+			if ( null === s )
+				s = "";
+			else
+			{
+				s = srcrooturi.relativize(s.toUri()).toString();
+				s += "[" + d.lineNumber + "," + d.columnNumber + "] ";
+			}
+
+			diag(d.kind, s + d.getMessage(locale));
+		}
+
+		var Charset = Java.type("java.nio.charset.Charset");
+
+		var smgr = tool.getStandardFileManager(
+				diagListener,
+				locale,
+				Charset.forName(report.inputEncoding)
+			);
+
+		/*
+		 * A special file manager that will rewrite the RELDOTS seen in
+		 * -linkoffline above. The options a file manager recognizes must be the
+		 * first ones in args; handleFirstOptions below returns at the first one
+		 * the file manager doesn't know what to do with. Java 19 seems to have
+		 * learned to pass the args to the file manager without the fuss here.
+		 */
+		var rmgr = new org.postgresql.pljava.pgxs.RelativizingFileManager(
+			smgr, Charset.forName(report.outputEncoding));
+
+		var v = java.lang.Runtime.version();
+		if ( 0 > v.compareTo(java.lang.Runtime.Version.parse("19-ea")) )
+			rmgr.handleFirstOptions(args);
+
+		var task = tool.getTask(null, rmgr, diagListener, null, args, null);
+		if (task.call())
+			return null;
+		return report.exceptionWrap("Javadoc errors were reported");
+	}
+	catch(e)
+	{
+		return report.exceptionWrap(e);
+	}
+}
+]]>
+							</script>
+						</configuration>
+					</reportSet>
+				</reportSets>
+			</plugin>
+		</plugins>
+	</reporting>
 </project>

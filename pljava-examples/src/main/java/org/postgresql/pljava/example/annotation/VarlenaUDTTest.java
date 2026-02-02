@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015- Tada AB and other contributors, as listed below.
+ * Copyright (c) 2015-2023 Tada AB and other contributors, as listed below.
  *
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the The BSD 3-Clause License
@@ -18,6 +18,8 @@ import java.sql.SQLOutput;
 
 import org.postgresql.pljava.annotation.SQLAction;
 import org.postgresql.pljava.annotation.BaseUDT;
+import org.postgresql.pljava.annotation.Function;
+import static org.postgresql.pljava.annotation.Function.Effects.IMMUTABLE;
 
 /**
  * A User Defined Type with varlena storage, testing github issue 52.
@@ -30,8 +32,9 @@ import org.postgresql.pljava.annotation.BaseUDT;
  */
 @SQLAction(requires="varlena UDT", install=
 "  SELECT CASE v::text = v::javatest.VarlenaUDTTest::text " +
-"   WHEN true THEN javatest.logmessage('INFO', 'works for ' || v) " +
-"   ELSE javatest.logmessage('WARNING', 'fails for ' || v) " +
+"   WHEN true " +
+"   THEN javatest.logmessage('INFO', 'VarlenaUDTTest works for ' || v) " +
+"   ELSE javatest.logmessage('WARNING', 'VarlenaUDTTest fails for ' || v) " +
 "   END " +
 "   FROM (VALUES (('32767')), (('32768')), (('65536')), (('1048576'))) " +
 "   AS t ( v )"
@@ -43,6 +46,7 @@ public class VarlenaUDTTest implements SQLData {
 
 	public VarlenaUDTTest() { }
 
+	@Function(effects=IMMUTABLE)
 	public static VarlenaUDTTest parse( String s, String typname) {
 		int i = Integer.parseInt( s);
 		VarlenaUDTTest u = new VarlenaUDTTest();
@@ -51,6 +55,7 @@ public class VarlenaUDTTest implements SQLData {
 		return u;
 	}
 
+	@Function(effects=IMMUTABLE)
 	public String toString() {
 		return String.valueOf( apop);
 	}
@@ -59,11 +64,13 @@ public class VarlenaUDTTest implements SQLData {
 		return typname;
 	}
 
+	@Function(effects=IMMUTABLE)
 	public void writeSQL( SQLOutput stream) throws SQLException {
 		for ( int i = 0 ; i < apop ; ++ i )
 			stream.writeByte( (byte)'a');
 	}
 
+	@Function(effects=IMMUTABLE)
 	public void readSQL( SQLInput stream, String typname) throws SQLException {
 		this.typname = typname;
 		int i = 0;
